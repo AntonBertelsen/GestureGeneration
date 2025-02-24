@@ -169,3 +169,10 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+# Dataset exclusion
+genea2023_dataset/
+
+data_pipe.sav
+
+.DS_Store
