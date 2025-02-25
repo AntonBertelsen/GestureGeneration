@@ -8,11 +8,7 @@ module_path = os.path.abspath(os.path.join('..'))
 if module_path not in sys.path:
     sys.path.append(module_path)
 
-from libraries.pymo.parsers import BVHParser
-from libraries.pymo.data import Joint, MocapData
-from libraries.pymo.preprocessing import *
-from libraries.pymo.viz_tools import *
-from libraries.pymo.writers import *
+from libraries.pymo.writers import BVHWriter
 
 from argparse import ArgumentParser
 
