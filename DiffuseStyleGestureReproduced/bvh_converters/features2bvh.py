@@ -13,6 +13,7 @@ from libraries.pymo.writers import BVHWriter
 from argparse import ArgumentParser
 
 import joblib as jl
+import numpy as np
 
 def feat2bvh(feat_file, bvh_file):
 

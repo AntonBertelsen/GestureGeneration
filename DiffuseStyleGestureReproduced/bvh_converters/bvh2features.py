@@ -2,7 +2,6 @@
 # and is released here: https://github.com/simonalexanderson/PyMO
 
 import numpy as np
-import pandas as pd
 from sklearn.pipeline import Pipeline
 
 from argparse import ArgumentParser
