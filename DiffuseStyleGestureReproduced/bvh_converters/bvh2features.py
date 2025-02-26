@@ -1,6 +1,7 @@
 # This code was written by Simon Alexanderson
 # and is released here: https://github.com/simonalexanderson/PyMO
 
+
 import numpy as np
 from sklearn.pipeline import Pipeline
 
@@ -9,14 +10,12 @@ from argparse import ArgumentParser
 import glob
 import os
 import sys
-module_path = os.path.abspath(os.path.join('..'))
-if module_path not in sys.path:
-    sys.path.append(module_path)
-
-from libraries.pymo.parsers import BVHParser
+from pymo.parsers import BVHParser
+from pymo.preprocessing import *
 
 import joblib as jl
 import glob
+
 
 # 18 joints (only upper body)
 #target_joints = ['b_spine0', 'b_spine1', 'b_spine2', 'b_spine3', 'b_l_shoulder', 'b_l_arm', 'b_l_arm_twist', 'b_l_forearm', 'b_l_wrist_twist', 'b_l_wrist', 'b_r_shoulder', 'b_r_arm', 'b_r_arm_twist', 'b_r_forearm', 'b_r_wrist_twist', 'b_r_wrist', 'b_neck0', 'b_head']
@@ -58,7 +57,7 @@ def extract_joint_angles(bvh_dir, file_names, dest_dir, pipeline_dir, fps):
     for file_name in file_names:
         file = os.path.join(dest_dir, file_name)
         print(file_name)
-        np.savez(file[:-4] + ".npz", clips=out_data[fi])
+        np.save(file[:-4] + ".npy", out_data[fi])
         fi=fi+1
 
 if __name__ == '__main__':

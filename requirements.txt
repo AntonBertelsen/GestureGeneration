@@ -1,0 +1,7 @@
+numpy
+torch
+torchaudio
+librosa # Possibly not needed. We use it only for calculating onsets, which is not that difficult to implement ourselves.
+matplotlib
+transformers
+datasets

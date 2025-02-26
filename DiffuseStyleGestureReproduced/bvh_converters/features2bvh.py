@@ -8,7 +8,7 @@ module_path = os.path.abspath(os.path.join('..'))
 if module_path not in sys.path:
     sys.path.append(module_path)
 
-from libraries.pymo.writers import BVHWriter
+from pymo.writers import BVHWriter
 
 from argparse import ArgumentParser
 
@@ -17,7 +17,7 @@ import numpy as np
 
 def feat2bvh(feat_file, bvh_file):
 
-    features = np.load(feat_file, allow_pickle=True)['clips']
+    features = np.load(feat_file, allow_pickle=True)
     print("Original features shape: ", features.shape)
 
     # shorten sequence length for visualization
