@@ -1,5 +1,23 @@
 import torch
 
+class JointSelector:
+    def __init__(self, target_joints, include_root=True):
+        self.target_joints = target_joints
+        self.include_root = include_root
+
+    def __call__(self, tracks):
+        Q = []
+
+        for track in tracks:
+            new_track = track.clone()
+            new_track.skeleton = [joint for joint in track.skeleton if joint in self.target_joints]
+            if self.include_root:
+                new_track.skeleton = [track.root_name] + new_track.skeleton
+            new_track.values = {key: value for key, value in track.values.items() if key in new_track.skeleton}
+            Q.append(new_track)
+
+        return Q
+
 class DownSampler:
     def __init__(self, tgt_fps, keep_all=True):
         self.tgt_fps = tgt_fps
@@ -26,7 +44,6 @@ class DownSampler:
                     break  # Only keep the first downsampled track if keep_all=False
 
         return Q
-    
 
 class ReverseTime:
     def __init__(self, append=True):
@@ -41,6 +58,8 @@ class ReverseTime:
             Q.append(new_track)
 
         return Q
+    def reverse(self, tracks):
+        return self.__call__(tracks)
 
 class Mirror:
     def __init__(self, axis="X", append=True):
@@ -89,3 +108,6 @@ class Mirror:
             Q.append(new_track)
 
         return Q
+    
+    def reverse(self, tracks):
+        return self.__call__(tracks)
