@@ -1,9 +1,9 @@
 import sys
 import os
 from sklearn.pipeline import Pipeline
-from bvh_processing.pymo.parsers import BVHParser
-from bvh_processing.pymo.writers import BVHWriter
-from bvh_processing.pymo.preprocessing import *
+from utils.bvh_processing.pymo.parsers import BVHParser
+from utils.bvh_processing.pymo.writers import BVHWriter
+from utils.bvh_processing.pymo.preprocessing import *
 import os
 import joblib as jl
 

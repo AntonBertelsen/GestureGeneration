@@ -6,10 +6,12 @@ from utils.audio_processing.extract_audio_features import extract_audio_features
 
 bvh_dir = 'dataset/genea2023_dataset/trn/main-agent/bvh'
 wav_dir = 'dataset/genea2023_dataset/trn/main-agent/wav'
+metadata_file = 'dataset/genea2023_dataset/trn/metadata.csv'
+
 
 # Find all the bvh files in the dataset directory for the main agent
-bvh_files = os.listdir(bvh_dir)
-wav_files = os.listdir(wav_dir)
+bvh_files = sorted(os.listdir(bvh_dir))
+wav_files = sorted(os.listdir(wav_dir))
 
 # The bvh converter is an object because some information needs to be retained between conversions to and from features. 
 # One reason is that not all bones are present in the features, so when we convert back, we need to add them back. This information is kept track off by
@@ -18,7 +20,7 @@ bvh_converter = BVHConverter()
 
 # Load the csv metadata file
 metadata = {}
-with open('dataset/genea2023_dataset/trn/metadata.csv', 'r') as f:
+with open(metadata_file, 'r') as f:
     reader = csv.DictReader(f)
     metadata = {row['prefix']: row for row in reader}
 
