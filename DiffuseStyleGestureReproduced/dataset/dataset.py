@@ -73,18 +73,11 @@ class AnimationDataset(Dataset):
 
 
 class OverlapAnimationDataset(Dataset):
-    def __init__(self, folder, seq_length=5, fps=30, epoch_length=10000):
-        """
-        Args:
-            folder (str): Folder containing .npz files.
-            seq_length (int): Duration (in seconds) of the clip.
-            fps (int): Frames per second.
-            epoch_length (int): Number of samples per epoch.
-        """
+    def __init__(self, folder, seq_length_in_frames=150, seed_length_in_frames=10, epoch_length=10000):
         self.folder = folder
-        self.seq_length = seq_length
-        self.fps = fps
-        self.chunk_size = seq_length * fps
+        self.seq_length_in_frames = seq_length_in_frames
+        self.seed_length_in_frames = seed_length_in_frames
+        self.chunk_size = seq_length_in_frames + seed_length_in_frames
         
         # List all npz files
         self.files = [os.path.join(folder, f) for f in os.listdir(folder) if f.endswith('.npz')]
@@ -112,11 +105,15 @@ class OverlapAnimationDataset(Dataset):
         start_frame = random.randint(0, total_frames - self.chunk_size)
         
         with np.load(file) as npz:
-            bvh_chunk = npz["bvh_features"][start_frame: start_frame + self.chunk_size]
+            gesture_chunk = npz["bvh_features"][start_frame + self.seed_length_in_frames: start_frame + self.chunk_size]
+            seed_chunk = npz["bvh_features"][start_frame: start_frame + self.seed_length_in_frames]
             audio_chunk = npz["audio_features"][start_frame: start_frame + self.chunk_size]
+            speaker = npz["main_agent_id_one_hot"]
 
         sample = {
-            "bvh": torch.tensor(bvh_chunk, dtype=torch.float32),
-            "audio": torch.tensor(audio_chunk, dtype=torch.float32)
+            "gesture": torch.tensor(gesture_chunk, dtype=torch.float32),
+            "seed": torch.tensor(gesture_chunk, dtype=torch.float32),
+            "audio": torch.tensor(audio_chunk, dtype=torch.float32),
+            "speaker": speaker
         }
         return sample

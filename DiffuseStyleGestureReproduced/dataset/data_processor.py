@@ -24,6 +24,13 @@ with open(metadata_file, 'r') as f:
     reader = csv.DictReader(f)
     metadata = {row['prefix']: row for row in reader}
 
+# Find number of speakers in the dataset
+speakers = set()
+for key in metadata:
+    speakers.add(metadata[key]['main-agent_id'])
+    speakers.add(metadata[key]['interloctr_id'])
+num_speakers = len(speakers)
+
 # Now I want to loop over each file pair and extract the joint angles from the bvh file and the audio features from the wav file
 for bvh_file, wav_file in zip(bvh_files, wav_files):
     print(bvh_file, wav_file)
@@ -39,6 +46,12 @@ for bvh_file, wav_file in zip(bvh_files, wav_files):
     interloctr_id = file_metadata.get('interloctr_id', '0')
     interloctr_has_fingers = file_metadata.get('interloctr_has_fingers', '0')
 
+    # agent id should be one-hot encoded in a vector
+    main_agent_id_one_hot = np.zeros(num_speakers)
+    main_agent_id_one_hot[int(main_agent_id)] = 1
+    interloctr_id_one_hot = np.zeros(num_speakers)
+    interloctr_id_one_hot[int(interloctr_id)] = 1
+
     # Extract joint angles from the bvh file
     bvh_features = bvh_converter.to_features(os.path.join(bvh_dir, bvh_file))
 
@@ -53,8 +66,8 @@ for bvh_file, wav_file in zip(bvh_files, wav_files):
                         bvh_features=bvh_features, 
                         audio_features=audio_features, 
                         prefix=prefix, 
-                        main_agent_id=main_agent_id, 
+                        main_agent_id_one_hot=main_agent_id_one_hot, 
                         main_agent_has_fingers=main_agent_has_fingers, 
-                        interloctr_id=interloctr_id, 
+                        interloctr_id_one_hot=interloctr_id_one_hot, 
                         interloctr_has_fingers=interloctr_has_fingers
                         )
