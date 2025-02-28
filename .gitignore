@@ -172,6 +172,7 @@ cython_debug/
 
 # Dataset exclusion
 genea2023_dataset/
+landscape/
 
 data_pipe.sav
 
