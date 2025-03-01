@@ -48,9 +48,9 @@ for bvh_file, wav_file in zip(bvh_files, wav_files):
 
     # agent id should be one-hot encoded in a vector
     main_agent_id_one_hot = np.zeros(num_speakers)
-    main_agent_id_one_hot[int(main_agent_id)] = 1
+    main_agent_id_one_hot[int(main_agent_id) - 1] = 1
     interloctr_id_one_hot = np.zeros(num_speakers)
-    interloctr_id_one_hot[int(interloctr_id)] = 1
+    interloctr_id_one_hot[int(interloctr_id) - 1] = 1
 
     # Extract joint angles from the bvh file
     bvh_features = bvh_converter.to_features(os.path.join(bvh_dir, bvh_file))
