@@ -5,3 +5,5 @@ librosa # Possibly not needed. We use it only for calculating onsets, which is n
 matplotlib
 transformers
 datasets
+einops
+local-attention
