@@ -26,6 +26,7 @@
         import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
         import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
         import { BVHLoader } from 'three/addons/loaders/BVHLoader.js';
+        import * as SkeletonUtils from 'three/addons/utils/SkeletonUtils.js';
 
 
         // Scene setup
@@ -89,20 +90,20 @@
 
         
         // scale the skeleton to 1 % of the original size
-        bvhData.skeleton.bones[0].scale.set(0.01, 0.01, 0.01);
+        bvhData.skeleton.bones[0].scale.set(0.005, 0.005, 0.005);
 
         // Scale down the root motion
         bvhClip.tracks.forEach((track) => {
             if (track.name === 'body_world.position') {
                 console.log('Scaling down root motion');
                 for (let i = 0; i < track.values.length; i++) {
-                    track.values[i] *= 0.01;
+                    track.values[i] *= 0.005;
                 }
             }
         });
 
         // print the equivalent glb skeleton
-        console.log(glbSkeleton);
+        //console.log(glbSkeleton);
         
 
         const skeletonHelper = new THREE.SkeletonHelper(
@@ -130,13 +131,18 @@
 
         //console.log(bvhData.clip);
 
-        //animationMixer = new THREE.AnimationMixer(glbModel);
-        //animAction = animationMixer.clipAction(bvhClip);
-        //animAction.reset();
-        //animAction.setLoop(THREE.LoopRepeat);
+        animationMixer = new THREE.AnimationMixer(glbModel);
 
-        //animAction.enabled = true;
-        //animAction.play();
+        console.log(glbModel);
+        console.log(skeletonHelper);
+
+        //let retargetedClip = SkeletonUtils.retargetClip(glbModel, bvhData, bvhClip);
+        animAction = animationMixer.clipAction(bvhClip);
+        animAction.reset();
+        animAction.setLoop(THREE.LoopRepeat);
+
+        animAction.enabled = true;
+        animAction.play();
 
         // create an anim mixer for the BVH skeleton
         let bvhMixer = new THREE.AnimationMixer(bvhData.skeleton.bones[0]);
@@ -158,7 +164,10 @@
             requestAnimationFrame(animate);
             let clockDelta = clock.getDelta();
             //if (animationMixer) animationMixer.update(clockDelta);
-            if (bvhMixer) bvhMixer.update(clockDelta);
+            if (bvhMixer) {
+                bvhMixer.update(clockDelta);
+                //SkeletonUtils.retarget( glbSkeleton, skeletonHelper );
+            }
 
             //updateBones();
 
