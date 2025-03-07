@@ -85,7 +85,7 @@ class OverlapAnimationDataset(Dataset):
         # For each file, compute total frames (store this info)
         self.frames_per_file = {}
         for file in self.files:
-            with np.load(file) as npz:
+            with np.load(file, allow_pickle = True) as npz:
                 total_frames = npz["bvh_features"].shape[0]
             # Only consider files that are long enough
             if total_frames >= self.chunk_size:
@@ -105,14 +105,14 @@ class OverlapAnimationDataset(Dataset):
         start_frame = random.randint(0, total_frames - self.chunk_size)
         
         with np.load(file) as npz:
-            gesture_chunk = npz["bvh_features"][start_frame + self.seed_length_in_frames: start_frame + self.chunk_size]
-            seed_chunk = npz["bvh_features"][start_frame: start_frame + self.seed_length_in_frames]
-            audio_chunk = npz["audio_features"][start_frame: start_frame + self.chunk_size]
+            gesture_chunk = npz["bvh_features"][start_frame + self.seed_length_in_frames : start_frame + self.chunk_size]
+            seed_chunk = npz["bvh_features"][start_frame : start_frame + self.seed_length_in_frames]
+            audio_chunk = npz["audio_features"][start_frame + self.seed_length_in_frames : start_frame + self.chunk_size]
             speaker = npz["main_agent_id_one_hot"]
 
         sample = {
             "gesture": torch.tensor(gesture_chunk, dtype=torch.float32),
-            "seed": torch.tensor(gesture_chunk, dtype=torch.float32),
+            "seed": torch.tensor(seed_chunk, dtype=torch.float32),
             "audio": torch.tensor(audio_chunk, dtype=torch.float32),
             "speaker": speaker
         }
