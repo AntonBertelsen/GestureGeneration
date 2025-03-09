@@ -380,10 +380,12 @@ class JointSelector(BaseEstimator, TransformerMixin):
         return Q
 
 
+# Modified by Anton Bertelsen to remove position data 09-03-2025
 class Numpyfier(BaseEstimator, TransformerMixin):
     '''
-    Just converts the values in a MocapData object into a numpy array
-    Useful for the final stage of a pipeline before training
+    Converts the values in a MocapData object into a numpy array.
+    Removes certain positional data and reconstructs them with zero values when converting back.
+    Useful for the final stage of a pipeline before training.
     '''
     def __init__(self):
         pass
@@ -392,15 +394,22 @@ class Numpyfier(BaseEstimator, TransformerMixin):
         self.org_mocap_ = X[0].clone()
         self.org_mocap_.values.drop(self.org_mocap_.values.index, inplace=True)
 
+        # Store columns related to position except for 'body_world'
+        self.position_columns_ = [col for col in self.org_mocap_.values.columns 
+                                  if 'position' in col and 'body_world' not in col]
+        
+        # Store first frame offsets for these position columns
+        self.initial_offsets_ = X[0].values.iloc[0][self.position_columns_].copy()
+
         return self
 
     def transform(self, X, y=None):
         print("Numpyfier")
         Q = []
-
         for track in X:
-            Q.append(track.values.values)
-            #print("Numpyfier:" + str(track.values.columns))
+            # Drop the stored position columns
+            track_values = track.values.drop(columns=self.position_columns_, errors='ignore')
+            Q.append(track_values.values)
 
         return np.array(Q)
 
@@ -408,15 +417,19 @@ class Numpyfier(BaseEstimator, TransformerMixin):
         Q = []
 
         for track in X:
-
             new_mocap = self.org_mocap_.clone()
             time_index = pd.to_timedelta([f for f in range(track.shape[0])], unit='s')
 
-            new_df =  pd.DataFrame(data=track, index=time_index, columns=self.org_mocap_.values.columns)
+            # Create a DataFrame without the removed position columns
+            new_df = pd.DataFrame(data=track, index=time_index, 
+                                  columns=[col for col in self.org_mocap_.values.columns 
+                                           if col not in self.position_columns_])
+
+            # Restore initial position offsets
+            for col in self.position_columns_:
+                new_df[col] = self.initial_offsets_[col]
 
             new_mocap.values = new_df
-
-
             Q.append(new_mocap)
 
         return Q
