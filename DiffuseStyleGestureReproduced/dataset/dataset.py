@@ -162,3 +162,52 @@ class FixedSampleAnimationDataset(Dataset):
 
     def __getitem__(self, idx):
         return self.sample
+    
+
+
+
+class TwoSampleAnimationDataset(Dataset):
+    def __init__(self, folder, seq_length_in_frames=5, seed_length_in_frames=10, epoch_length=10000):
+        """
+        A dataset that always returns the first snippet of the first file.
+        Useful for debugging.
+        
+        Args:
+            folder (str): Path to folder containing .npz files.
+            seq_length (int): Duration (in seconds) of the clip to load.
+            fps (int): Frames per second in the animation.
+        """
+        self.folder = folder
+        self.seq_length_in_frames = seq_length_in_frames
+        self.seed_length_in_frames = seed_length_in_frames
+        self.chunk_size = seq_length_in_frames + seed_length_in_frames
+        self.epoch_length = epoch_length
+        
+        # List all npz files and select the first one
+        self.files = [os.path.join(folder, f) for f in os.listdir(folder) if f.endswith('.npz')]
+        if not self.files:
+            raise ValueError("No .npz files found in the provided folder.")
+        
+        self.file = self.files[0]  # Always use the first file
+        
+        # Pick a random starting frame as either 0 or 500
+        start_frame = random.choice([0, 500])
+        
+        with np.load(self.file) as npz:
+            self.gesture_chunk = npz["bvh_features"][start_frame + self.seed_length_in_frames : start_frame + self.chunk_size]
+            self.seed_chunk = npz["bvh_features"][start_frame : start_frame + self.seed_length_in_frames]
+            self.audio_chunk = npz["audio_features"][start_frame + self.seed_length_in_frames : start_frame + self.chunk_size]
+            self.speaker = npz["main_agent_id_one_hot"]
+
+        self.sample = {
+            "gesture": torch.tensor(self.gesture_chunk, dtype=torch.float32),
+            "seed": torch.tensor(self.seed_chunk, dtype=torch.float32),
+            "audio": torch.tensor(self.audio_chunk, dtype=torch.float32),
+            "speaker": self.speaker
+        }
+
+    def __len__(self):
+        return self.epoch_length
+
+    def __getitem__(self, idx):
+        return self.sample
