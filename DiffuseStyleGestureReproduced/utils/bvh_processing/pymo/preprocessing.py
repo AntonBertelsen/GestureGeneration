@@ -172,9 +172,7 @@ class MocapParameterizer(BaseEstimator, TransformerMixin):
 
         Q = []
         for track in X:
-            channels = []
-            titles = []
-            euler_df = track.values
+            euler_df = track.values.copy()  # Copy the DataFrame
 
             # Create a new DataFrame to store the exponential map rep
             exp_df = euler_df.copy()
@@ -185,23 +183,32 @@ class MocapParameterizer(BaseEstimator, TransformerMixin):
             # List the joints that are not end sites, i.e., have channels
             joints = (joint for joint in track.skeleton if 'Nub' not in joint)
 
-            for joint in joints:
-                r = euler_df[[c for c in rots if joint in c]] # Get the columns that belong to this joint
-                rot_order = track.skeleton[joint]['order']
-                r1_col = '%s_%srotation'%(joint, rot_order[0])
-                r2_col = '%s_%srotation'%(joint, rot_order[1])
-                r3_col = '%s_%srotation'%(joint, rot_order[2])
+            # Prepare a dictionary to store the new exponential map columns
+            new_columns = {}
 
+            for joint in joints:
+                r = euler_df[[c for c in rots if joint in c]]  # Get the columns that belong to this joint
+                rot_order = track.skeleton[joint]['order']
+                r1_col = f'{joint}_{rot_order[0]}rotation'
+                r2_col = f'{joint}_{rot_order[1]}rotation'
+                r3_col = f'{joint}_{rot_order[2]}rotation'
+
+                # Drop the original rotation channels
                 exp_df.drop([r1_col, r2_col, r3_col], axis=1, inplace=True)
-                euler = [[f[1][r1_col], f[1][r2_col], f[1][r3_col]] for f in r.iterrows()]
+
+                # Extract Euler angles and convert them to exponential maps
+                euler = np.column_stack([r[r1_col], r[r2_col], r[r3_col]])
                 exps = np.array(self.fix_rotvec(R.from_euler(rot_order.lower(), euler, degrees=True).as_rotvec()))
 
-                # Create the corresponding columns in the new DataFrame
-                exp_df.insert(loc=0, column='%s_gamma'%joint, value=pd.Series(data=[e[2] for e in exps], index=exp_df.index))
-                exp_df.insert(loc=0, column='%s_beta'%joint, value=pd.Series(data=[e[1] for e in exps], index=exp_df.index))
-                exp_df.insert(loc=0, column='%s_alpha'%joint, value=pd.Series(data=[e[0] for e in exps], index=exp_df.index))
+                # Store the new exponential map values
+                new_columns[f'{joint}_alpha'] = exps[:, 0]
+                new_columns[f'{joint}_beta'] = exps[:, 1]
+                new_columns[f'{joint}_gamma'] = exps[:, 2]
 
-            #print(exp_df.columns)
+            # Add the new exponential map columns all at once using pd.DataFrame and concat
+            exp_df = pd.concat([exp_df, pd.DataFrame(new_columns, index=exp_df.index)], axis=1)
+
+            # Create the new track with the updated DataFrame
             new_track = track.clone()
             new_track.values = exp_df
             Q.append(new_track)
@@ -211,32 +218,40 @@ class MocapParameterizer(BaseEstimator, TransformerMixin):
     def _expmap_to_euler(self, X):
         Q = []
         for track in X:
-            channels = []
-            titles = []
             exp_df = track.values
 
             # Create a new DataFrame to store the exponential map rep
             euler_df = exp_df.copy()
 
             # List the columns that contain rotation channels
-            exp_params = [c for c in exp_df.columns if ( any(p in c for p in ['alpha', 'beta','gamma']) and 'Nub' not in c)]
+            exp_params = [c for c in exp_df.columns if (any(p in c for p in ['alpha', 'beta', 'gamma']) and 'Nub' not in c)]
 
             # List the joints that are not end sites, i.e., have channels
             joints = (joint for joint in track.skeleton if 'Nub' not in joint)
 
-            for joint in joints:
-                r = exp_df[[c for c in exp_params if joint in c]] # Get the columns that belong to this joint
+            # Prepare a dictionary to store the new columns to add at once
+            new_columns = {}
 
-                euler_df.drop(['%s_alpha'%joint, '%s_beta'%joint, '%s_gamma'%joint], axis=1, inplace=True)
-                expmap = [[f[1]['%s_alpha'%joint], f[1]['%s_beta'%joint], f[1]['%s_gamma'%joint]] for f in r.iterrows()] # Make sure the columsn are organized in xyz order
+            for joint in joints:
+                r = exp_df[[c for c in exp_params if joint in c]]  # Get the columns that belong to this joint
+
+                # Drop the original rotation channels from the DataFrame
+                euler_df.drop(['%s_alpha' % joint, '%s_beta' % joint, '%s_gamma' % joint], axis=1, inplace=True)
+
+                # Prepare the exponential map for this joint
+                expmap = [[f[1]['%s_alpha' % joint], f[1]['%s_beta' % joint], f[1]['%s_gamma' % joint]] for f in r.iterrows()]
                 rot_order = track.skeleton[joint]['order']
                 euler_rots = np.array(R.from_rotvec(expmap).as_euler(rot_order.lower(), degrees=True))
 
-                # Create the corresponding columns in the new DataFrame
-                euler_df['%s_%srotation'%(joint, rot_order[0])] = pd.Series(data=[e[0] for e in euler_rots], index=euler_df.index)
-                euler_df['%s_%srotation'%(joint, rot_order[1])] = pd.Series(data=[e[1] for e in euler_rots], index=euler_df.index)
-                euler_df['%s_%srotation'%(joint, rot_order[2])] = pd.Series(data=[e[2] for e in euler_rots], index=euler_df.index)
+                # Add the new euler rotations to the dictionary
+                new_columns[f'{joint}_{rot_order[0]}rotation'] = [e[0] for e in euler_rots]
+                new_columns[f'{joint}_{rot_order[1]}rotation'] = [e[1] for e in euler_rots]
+                new_columns[f'{joint}_{rot_order[2]}rotation'] = [e[2] for e in euler_rots]
 
+            # Add all the new columns at once using pd.DataFrame
+            euler_df = pd.concat([euler_df, pd.DataFrame(new_columns, index=euler_df.index)], axis=1)
+
+            # Create the new track with the updated DataFrame
             new_track = track.clone()
             new_track.values = euler_df
             Q.append(new_track)
@@ -373,8 +388,19 @@ class JointSelector(BaseEstimator, TransformerMixin):
         for track in X:
             t2 = track.clone()
             t2.skeleton = self.orig_skeleton
+
+            # Prepare a dictionary to store the new columns to add at once
+            new_columns = {}
+
+            # Populate the new columns dictionary with the not selected values
             for d in self.not_selected:
-                t2.values[d] = self.not_selected_values[d]
+                new_columns[d] = self.not_selected_values[d]
+
+            # If new_columns is not empty, add the columns all at once using pd.DataFrame
+            if new_columns:
+                new_columns_df = pd.DataFrame(new_columns, index=t2.values.index)
+                t2.values = pd.concat([t2.values, new_columns_df], axis=1)
+
             Q.append(t2)
 
         return Q
@@ -422,15 +448,64 @@ class Numpyfier(BaseEstimator, TransformerMixin):
 
             # Create a DataFrame without the removed position columns
             new_df = pd.DataFrame(data=track, index=time_index, 
-                                  columns=[col for col in self.org_mocap_.values.columns 
-                                           if col not in self.position_columns_])
+                                columns=[col for col in self.org_mocap_.values.columns 
+                                        if col not in self.position_columns_])
 
-            # Restore initial position offsets
-            for col in self.position_columns_:
-                new_df[col] = self.initial_offsets_[col]
+            # Restore initial position offsets by creating a dictionary of columns to add
+            restored_columns = {col: self.initial_offsets_[col] for col in self.position_columns_}
+            
+            # Concatenate the restored columns to the new DataFrame
+            restored_df = pd.DataFrame(restored_columns, index=new_df.index)
+            new_df = pd.concat([new_df, restored_df], axis=1)
 
             new_mocap.values = new_df
             Q.append(new_mocap)
+
+        return Q
+
+
+# In order to get a nicer representation of the data, we can scale the position channels down so they are in the same range as the rotation channels.
+class PositionScaler(BaseEstimator, TransformerMixin):
+    def __init__(self, scale=0.1):
+        self.scale = scale
+
+    def fit(self, X, y=None):
+        return self
+
+    def transform(self, X, y=None):
+        print("positionScaler")
+        Q = []
+
+        for track in X:
+            new_df = track.values.copy()
+
+            # List the columns that contain position channels
+            pos_cols = [c for c in new_df.columns if ('position' in c)]
+
+            for pos_col in pos_cols:
+                new_df[pos_col] = new_df[pos_col]*self.scale
+
+            new_track = track.clone()
+            new_track.values = new_df
+            Q.append(new_track)
+
+        return Q
+
+    def inverse_transform(self, X, copy=None):
+        Q = []
+
+        for track in X:
+            new_df = track.values.copy()
+
+            # List the columns that contain position channels
+            pos_cols = [c for c in new_df.columns if ('position' in c)]
+
+            for pos_col in pos_cols:
+                new_df[pos_col] = new_df[pos_col]/self.scale
+
+            new_track = track.clone()
+            new_track.values = new_df
+            Q.append(new_track)
 
         return Q
 
