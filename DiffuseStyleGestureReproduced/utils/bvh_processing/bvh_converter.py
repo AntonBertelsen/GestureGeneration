@@ -18,6 +18,7 @@ class BVHConverter:
             ('dwnsampl', DownSampler(tgt_fps=30,  keep_all=False)),
             ('jtsel', JointSelector(target_joints, include_root=False)),
             ('exp', MocapParameterizer('expmap')),
+            ('posscale', PositionScaler(scale=0.1)),
             ('np', Numpyfier())
         ])
         out_data = data_pipe.fit_transform([data])

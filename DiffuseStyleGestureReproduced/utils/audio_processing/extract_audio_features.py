@@ -38,6 +38,15 @@ def extract_audio_features(audio_file):
     mel_spec, mfcc, rms_energy, pitch, energy_derivatives, pitch_derivatives, onsets = extract_simple_features(waveform, sample_rate, device)
     wavlm_features = extract_wavlm_features(waveform, device)
 
+    # normalize the features
+    mel_spec = F.layer_norm(mel_spec, mel_spec.shape)
+    mfcc = F.layer_norm(mfcc, mfcc.shape)
+    rms_energy = F.layer_norm(rms_energy, rms_energy.shape)
+    pitch = F.layer_norm(pitch, pitch.shape)
+    energy_derivatives = F.layer_norm(energy_derivatives, energy_derivatives.shape)
+    pitch_derivatives = F.layer_norm(pitch_derivatives, pitch_derivatives.shape)
+    wavlm_features = F.layer_norm(wavlm_features, wavlm_features.shape)
+
     print("Mel spectrogram shape:", mel_spec.shape)
     print("MFCC shape:", mfcc.shape)
     print("RMS energy shape:", rms_energy.shape)
@@ -117,14 +126,11 @@ def extract_simple_features(waveform, sample_rate, device):
 
 def extract_wavlm_features(waveform, device):
 
+
     # Load the pretrained model and feature extractor
     feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained("microsoft/wavlm-base")
     model = WavLMModel.from_pretrained("microsoft/wavlm-base")
     model.to(device)
-
-    # Load an audio file (assumed to be mono, 16kHz)
-    # waveform, wav_sample_rate = torchaudio.load("dataset/genea2023_dataset/trn/main-agent/wav/trn_2023_v0_000_main-agent.wav")
-    # waveform = torchaudio.transforms.Resample(orig_freq=wav_sample_rate, new_freq=16000)(waveform)
 
     sample_rate = 16000  # WavLM expects 16kHz input
 
@@ -144,9 +150,14 @@ def extract_wavlm_features(waveform, device):
     inputs = feature_extractor(batch_tensor, return_tensors="pt", sampling_rate=sample_rate)
     inputs["input_values"] = inputs["input_values"].squeeze() # Remove extra dimension which is added by the feature extractor
 
+    # Print the types and shapes to debug
+    print(f"input_values type: {inputs['input_values'].dtype}, shape: {inputs['input_values'].shape}")
+
     # Batch processing does not work with WavLM because the attention mask is not automatically copied across batches when not supplied. 
     # I believe this might be a bug. This line is a hacky way to manually construct the attention mask for the input
-    inputs["attention_mask"] = (inputs["input_values"] != 0)
+    inputs["attention_mask"] = (inputs["input_values"] != 0).to(torch.long)
+
+    print(f"attention_mask type: {inputs['attention_mask'].dtype}, shape: {inputs['attention_mask'].shape}")
 
     # Extract WavLM embeddings
     with torch.no_grad():
@@ -164,16 +175,6 @@ def extract_wavlm_features(waveform, device):
 
     # Now I flatten the tensor to place each batch back one after each other. (How am I sure that it is being reconstructed in the right order?)
     embeddings_flattened = embeddings_downsampled.flatten(start_dim=0, end_dim=1)
-    # print(embeddings_flattened.shape) # ([1950, 768])
-
-    # The dimensions are not quite right. Let me copy the approach from pitch where I crop or pad the tensor to the right size
-    # A little silly, but I don't think there is anything else to do
-    # desired_length = waveform.shape[-1] // hop_length + 1
-
-    # if embeddings_flattened.shape[0] < desired_length:
-    #     embeddings_flattened = F.pad(embeddings_flattened, (0, 0, 0, desired_length - embeddings_flattened.shape[0]))
-    # elif embeddings_flattened.shape[0] > desired_length:
-    #     embeddings_flattened = embeddings_flattened[:desired_length]
 
     # print(embeddings_flattened.shape)
     return embeddings_flattened
