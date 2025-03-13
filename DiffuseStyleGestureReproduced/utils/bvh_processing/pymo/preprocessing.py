@@ -463,6 +463,47 @@ class Numpyfier(BaseEstimator, TransformerMixin):
 
         return Q
 
+class PoseRelativizer(BaseEstimator, TransformerMixin):
+    def __init__(self, avg_pose):
+        self.avg_pose = avg_pose
+
+    def fit(self, X, y=None):
+        return self
+    
+    def transform(self, X, y=None):
+        print("PoseRelativizer")
+        Q = []
+
+        for track in X:
+            new_track = track.clone()
+            new_df = track.values.copy()
+
+            for col in new_df.columns:
+                if 'position' in col or 'rotation' in col:
+                    print("average pose", self.avg_pose[col])
+                    new_df[col] = new_df[col] - self.avg_pose[col]
+
+            new_track.values = new_df
+            Q.append(new_track)
+
+        return Q
+
+    def inverse_transform(self, X, copy=None):
+        Q = []
+
+        for track in X:
+            new_track = track.clone()
+            new_df = track.values.copy()
+
+            for col in new_df.columns:
+                if 'position' in col or 'rotation' in col:
+                    print("average pose", self.avg_pose[col])
+                    new_df[col] = new_df[col] + self.avg_pose[col]
+
+            new_track.values = new_df
+            Q.append(new_track)
+
+        return Q
 
 # In order to get a nicer representation of the data, we can scale the position channels down so they are in the same range as the rotation channels.
 class PositionScaler(BaseEstimator, TransformerMixin):

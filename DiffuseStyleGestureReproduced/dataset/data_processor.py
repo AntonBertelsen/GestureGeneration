@@ -31,6 +31,13 @@ for key in metadata:
     speakers.add(metadata[key]['interloctr_id'])
 num_speakers = len(speakers)
 
+# I want to find the average pose of the dataset to store positions relative to this pose
+print("Calculating average pose")
+avg_pose = bvh_converter.calculate_average_pose(bvh_files, bvh_dir)
+print("Done calculating average pose!")
+
+print("Extracting features")
+
 # Now I want to loop over each file pair and extract the joint angles from the bvh file and the audio features from the wav file
 for bvh_file, wav_file in zip(bvh_files, wav_files):
     print(bvh_file, wav_file)
@@ -53,7 +60,7 @@ for bvh_file, wav_file in zip(bvh_files, wav_files):
     interloctr_id_one_hot[int(interloctr_id) - 1] = 1
 
     # Extract joint angles from the bvh file
-    bvh_features = bvh_converter.to_features(os.path.join(bvh_dir, bvh_file))
+    bvh_features = bvh_converter.to_features(os.path.join(bvh_dir, bvh_file), avg_pose)
 
     # Extract audio features from the wav file
     audio_features = extract_audio_features(os.path.join(wav_dir, wav_file))

@@ -11,12 +11,13 @@ target_joints = ['body_world', 'b_root', 'b_r_foot', 'b_l_foot', 'b_l_upleg', 'b
 
 class BVHConverter:
 
-    def to_features(cls, path):
+    def to_features(cls, path, avg_pose):
         p = BVHParser()
         data = p.parse(path)
         data_pipe = Pipeline([
             ('dwnsampl', DownSampler(tgt_fps=30,  keep_all=False)),
             ('jtsel', JointSelector(target_joints, include_root=False)),
+            ('pose_relativizer', PoseRelativizer(avg_pose)),
             ('exp', MocapParameterizer('expmap')),
             ('posscale', PositionScaler(scale=0.1)),
             ('np', Numpyfier())
@@ -40,4 +41,40 @@ class BVHConverter:
         writer = BVHWriter()
         with open(bvh_file,'w') as f:
             writer.write(bvh_data[0], f)
+
+
+    # This function calculates the average pose of a set of bvh files. This is useful for normalizing the data relative to this which will
+    # hopefully help the model learn more effectively, and mean we can use less noise in the diffusion process as the data is contained within a smaller range.
+    # At least this is the idea. Right now it weights every bvh file equally, but not all bvh files are the same length, so this could be improved.
+    def calculate_average_pose(cls, bvh_files, bvh_dir):
+        # Load the data
+        data_pipe = Pipeline([
+            ('dwnsampl', DownSampler(tgt_fps=30,  keep_all=False)),
+            ('jtsel', JointSelector(target_joints, include_root=False)),
+            ('posscale', PositionScaler(scale=0.1))
+        ])
+        all_data = None
+        i = 0
+        for bvh_file in bvh_files:
+            i = i + 1
+            if i % 5 == 0:
+                break
+            print("appending", bvh_file)
+            p = BVHParser()
+            print("extracting features from", bvh_file)
+            bvh_data = p.parse(os.path.join(bvh_dir, bvh_file))
+            data = data_pipe.fit_transform([bvh_data])
+
+            print(data[0].values)
+            if(all_data is None):
+                all_data = {key: 0.0 for key in data[0].values}
+            else:
+                all_data = {key: all_data[key] + np.mean(data[0].values[key] / 5, axis=0) for key in data[0].values}
+        
+        print("Calculating average pose")
+        avg_pose = all_data
+        print("Done calculating average pose:")
+        print(avg_pose)
+        return avg_pose
+
         
