@@ -10,4 +10,3 @@ local-attention
 
 # for generatting videos of the defussion and generation processes - mainly for debugging
 moviepy
-PIL

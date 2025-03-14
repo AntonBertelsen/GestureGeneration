@@ -104,7 +104,7 @@ class OverlapAnimationDataset(Dataset):
         # Choose a random start such that a chunk of self.chunk_size fits in the file.
         start_frame = random.randint(0, total_frames - self.chunk_size)
         
-        with np.load(file) as npz:
+        with np.load(file, mmap_mode='r') as npz:
             gesture_chunk = npz["bvh_features"][start_frame + self.seed_length_in_frames : start_frame + self.chunk_size]
             seed_chunk = npz["bvh_features"][start_frame : start_frame + self.seed_length_in_frames]
             audio_chunk = npz["audio_features"][start_frame + self.seed_length_in_frames : start_frame + self.chunk_size]
@@ -164,50 +164,90 @@ class FixedSampleAnimationDataset(Dataset):
         return self.sample
     
 
-
-
-class TwoSampleAnimationDataset(Dataset):
-    def __init__(self, folder, seq_length_in_frames=5, seed_length_in_frames=10, epoch_length=10000):
-        """
-        A dataset that always returns the first snippet of the first file.
-        Useful for debugging.
-        
-        Args:
-            folder (str): Path to folder containing .npz files.
-            seq_length (int): Duration (in seconds) of the clip to load.
-            fps (int): Frames per second in the animation.
-        """
+class OverlapAnimationDatasetPerformant(Dataset):
+    def __init__(self, folder, seq_length_in_frames=150, seed_length_in_frames=10, epoch_length=10000, cache_size=5):
         self.folder = folder
         self.seq_length_in_frames = seq_length_in_frames
         self.seed_length_in_frames = seed_length_in_frames
         self.chunk_size = seq_length_in_frames + seed_length_in_frames
-        self.epoch_length = epoch_length
         
-        # List all npz files and select the first one
+        # List all npz files
         self.files = [os.path.join(folder, f) for f in os.listdir(folder) if f.endswith('.npz')]
-        if not self.files:
-            raise ValueError("No .npz files found in the provided folder.")
         
-        self.file = self.files[0]  # Always use the first file
-        
-        # Pick a random starting frame as either 0 or 500
-        start_frame = random.choice([0, 500])
-        
-        with np.load(self.file) as npz:
-            self.gesture_chunk = npz["bvh_features"][start_frame + self.seed_length_in_frames : start_frame + self.chunk_size]
-            self.seed_chunk = npz["bvh_features"][start_frame : start_frame + self.seed_length_in_frames]
-            self.audio_chunk = npz["audio_features"][start_frame + self.seed_length_in_frames : start_frame + self.chunk_size]
-            self.speaker = npz["main_agent_id_one_hot"]
+        # For each file, compute total frames (store this info)
+        self.frames_per_file = {}
+        for file in self.files:
+            with np.load(file, allow_pickle=True) as npz:
+                total_frames = npz["bvh_features"].shape[0]
+            # Only consider files that are long enough
+            if total_frames >= self.chunk_size:
+                self.frames_per_file[file] = total_frames
 
-        self.sample = {
-            "gesture": torch.tensor(self.gesture_chunk, dtype=torch.float32),
-            "seed": torch.tensor(self.seed_chunk, dtype=torch.float32),
-            "audio": torch.tensor(self.audio_chunk, dtype=torch.float32),
-            "speaker": self.speaker
-        }
+        self.valid_files = list(self.frames_per_file.keys())
+        self.epoch_length = epoch_length  # Fixed number of samples per epoch
+
+        # Cache size per worker (not shared globally between workers)
+        self.cache_size = cache_size
 
     def __len__(self):
         return self.epoch_length
 
+    def _get_chunk(self, file, start_frame):
+        """ Return the required chunk from the file """
+        with np.load(file, mmap_mode='r') as npz:
+            bvh_features = npz["bvh_features"]
+            audio_features = npz["audio_features"]
+            seed_chunk = bvh_features[start_frame : start_frame + self.seed_length_in_frames]
+            gesture_chunk = bvh_features[start_frame + self.seed_length_in_frames : start_frame + self.chunk_size]
+            audio_chunk = audio_features[start_frame + self.seed_length_in_frames : start_frame + self.chunk_size]
+            speaker = npz["main_agent_id_one_hot"]
+        return seed_chunk, gesture_chunk, audio_chunk, speaker
+
     def __getitem__(self, idx):
-        return self.sample
+        # Randomly select a file (each sample is independent)
+        file = random.choice(self.valid_files)
+        total_frames = self.frames_per_file[file]
+        
+        # Choose a random start such that a chunk of self.chunk_size fits in the file.
+        start_frame = random.randint(0, total_frames - self.chunk_size)
+        
+        # Retrieve data from the file
+        seed_chunk, gesture_chunk, audio_chunk, speaker = self._get_chunk(file, start_frame)
+
+        # Convert to tensors (you may want to consider using `pin_memory=True` when loading data)
+        sample = {
+            "gesture": torch.tensor(gesture_chunk, dtype=torch.float32),
+            "seed": torch.tensor(seed_chunk, dtype=torch.float32),
+            "audio": torch.tensor(audio_chunk, dtype=torch.float32),
+            "speaker": speaker
+        }
+        
+        return sample
+
+    def _worker_cache_init(self, worker_id):
+        """ Initialize worker-specific cache """
+        # Split the files between workers
+        files_per_worker = len(self.valid_files) // torch.utils.data.get_worker_info().num_workers
+        start_idx = worker_id * files_per_worker
+        end_idx = (worker_id + 1) * files_per_worker if worker_id != torch.utils.data.get_worker_info().num_workers - 1 else len(self.valid_files)
+        
+        # Cache the files assigned to this worker
+        self.cached_files = {}
+        for file in self.valid_files[start_idx:end_idx]:
+            self.cached_files[file] = self._load_file_to_cache(file)
+
+    def _load_file_to_cache(self, file):
+        """ Load a file into memory for faster access """
+        with np.load(file, mmap_mode='r') as npz:
+            return npz
+
+    def get_cached_chunk(self, file, start_frame):
+        """ Retrieve a chunk from the cached file """
+        npz = self.cached_files[file]
+        bvh_features = npz["bvh_features"]
+        audio_features = npz["audio_features"]
+        seed_chunk = bvh_features[start_frame : start_frame + self.seed_length_in_frames]
+        gesture_chunk = bvh_features[start_frame + self.seed_length_in_frames : start_frame + self.chunk_size]
+        audio_chunk = audio_features[start_frame + self.seed_length_in_frames : start_frame + self.chunk_size]
+        speaker = npz["main_agent_id_one_hot"]
+        return seed_chunk, gesture_chunk, audio_chunk, speaker
