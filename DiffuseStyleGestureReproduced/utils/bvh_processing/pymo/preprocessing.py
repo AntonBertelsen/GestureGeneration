@@ -480,7 +480,6 @@ class PoseRelativizer(BaseEstimator, TransformerMixin):
 
             for col in new_df.columns:
                 if 'position' in col or 'rotation' in col:
-                    print("average pose", self.avg_pose[col])
                     new_df[col] = new_df[col] - self.avg_pose[col]
 
             new_track.values = new_df
@@ -497,7 +496,6 @@ class PoseRelativizer(BaseEstimator, TransformerMixin):
 
             for col in new_df.columns:
                 if 'position' in col or 'rotation' in col:
-                    print("average pose", self.avg_pose[col])
                     new_df[col] = new_df[col] + self.avg_pose[col]
 
             new_track.values = new_df

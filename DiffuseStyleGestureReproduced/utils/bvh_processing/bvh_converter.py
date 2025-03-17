@@ -54,11 +54,11 @@ class BVHConverter:
             ('posscale', PositionScaler(scale=0.1))
         ])
         all_data = None
-        i = 0
+        # i = 0
         for bvh_file in bvh_files:
-            i = i + 1
-            if i % 5 == 0:
-                break
+            # i = i + 1
+            # if i % 5 == 0:
+            #     break
             print("appending", bvh_file)
             p = BVHParser()
             print("extracting features from", bvh_file)
@@ -69,7 +69,7 @@ class BVHConverter:
             if(all_data is None):
                 all_data = {key: 0.0 for key in data[0].values}
             else:
-                all_data = {key: all_data[key] + np.mean(data[0].values[key] / 5, axis=0) for key in data[0].values}
+                all_data = {key: all_data[key] + np.mean(data[0].values[key] / len(bvh_files), axis=0) for key in data[0].values}
         
         print("Calculating average pose")
         avg_pose = all_data

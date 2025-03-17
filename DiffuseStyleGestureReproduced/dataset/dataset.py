@@ -164,90 +164,73 @@ class FixedSampleAnimationDataset(Dataset):
         return self.sample
     
 
-class OverlapAnimationDatasetPerformant(Dataset):
-    def __init__(self, folder, seq_length_in_frames=150, seed_length_in_frames=10, epoch_length=10000, cache_size=5):
+import time
+import os
+import pickle
+
+class RAMResidentDataset(Dataset):
+    """Dataset that keeps all data in RAM for maximum speed"""
+    def __init__(self, folder, windows_file, batch_size=32, epoch_length=1000):
+        self.batch_size = batch_size
+        self.epoch_length = epoch_length
         self.folder = folder
-        self.seq_length_in_frames = seq_length_in_frames
-        self.seed_length_in_frames = seed_length_in_frames
-        self.chunk_size = seq_length_in_frames + seed_length_in_frames
+
+        # Create a log file
+        self.log_dir = os.path.join(os.path.dirname(self.folder), "profiling_logs")
+        os.makedirs(self.log_dir, exist_ok=True)
+        self.log_file = os.path.join(self.log_dir, f"dataloader_profile_{time.strftime('%Y%m%d_%H%M%S')}.log")
+
+        # Load metadata
+        meta_file = windows_file.replace('.npz', '_meta.pkl')
+        with open(meta_file, 'rb') as f:
+            self.metadata = pickle.load(f)
         
-        # List all npz files
-        self.files = [os.path.join(folder, f) for f in os.listdir(folder) if f.endswith('.npz')]
+        print(f"Loading entire dataset into RAM from {windows_file}")
+        start_time = time.time()
         
-        # For each file, compute total frames (store this info)
-        self.frames_per_file = {}
-        for file in self.files:
-            with np.load(file, allow_pickle=True) as npz:
-                total_frames = npz["bvh_features"].shape[0]
-            # Only consider files that are long enough
-            if total_frames >= self.chunk_size:
-                self.frames_per_file[file] = total_frames
+        # Load the ENTIRE dataset into RAM (not memory-mapped)
+        data = np.load(windows_file)
 
-        self.valid_files = list(self.frames_per_file.keys())
-        self.epoch_length = epoch_length  # Fixed number of samples per epoch
-
-        # Cache size per worker (not shared globally between workers)
-        self.cache_size = cache_size
-
+        # Load the dataset into RAM using memory-mapped arrays
+        # data = np.load(windows_file, mmap_mode='r')
+        
+        # Convert all arrays to torch tensors immediately
+        self.gestures = torch.from_numpy(data['gestures']).half()
+        self.seeds = torch.from_numpy(data['seeds']).half()
+        self.audio = torch.from_numpy(data['audio']).half()
+        self.speakers = torch.from_numpy(data['speakers']).half()
+        
+        # Close numpy file to free file handles
+        data.close()
+        
+        self.num_windows = len(self.gestures)
+        
+        # Pre-generate batch indices once
+        self.batch_indices = [torch.randperm(self.num_windows)[:self.batch_size] for _ in range(self.epoch_length)]
+        
+        with open(self.log_file, 'a') as f:
+            f.write(f"Dataset loaded into RAM in {time.time() - start_time:.2f} seconds\n")
+            f.write(f"Using {self.gestures.element_size() * self.gestures.nelement() / 1024**3:.2f} GB for gestures\n")
+            f.write(f"Using {self.seeds.element_size() * self.seeds.nelement() / 1024**3:.2f} GB for seeds\n")
+            f.write(f"Using {self.audio.element_size() * self.audio.nelement() / 1024**3:.2f} GB for audio\n")
+            f.write(f"Total: {(self.gestures.element_size() * self.gestures.nelement() + self.seeds.element_size() * self.seeds.nelement() + self.audio.element_size() * self.audio.nelement()) / 1024**3:.2f} GB\n\n")
+    
+    def reshuffle(self):
+        """Generate new random batches"""
+        self.batch_indices = [torch.randperm(self.num_windows)[:self.batch_size] for _ in range(self.epoch_length)]
+        
     def __len__(self):
         return self.epoch_length
-
-    def _get_chunk(self, file, start_frame):
-        """ Return the required chunk from the file """
-        with np.load(file, mmap_mode='r') as npz:
-            bvh_features = npz["bvh_features"]
-            audio_features = npz["audio_features"]
-            seed_chunk = bvh_features[start_frame : start_frame + self.seed_length_in_frames]
-            gesture_chunk = bvh_features[start_frame + self.seed_length_in_frames : start_frame + self.chunk_size]
-            audio_chunk = audio_features[start_frame + self.seed_length_in_frames : start_frame + self.chunk_size]
-            speaker = npz["main_agent_id_one_hot"]
-        return seed_chunk, gesture_chunk, audio_chunk, speaker
-
+        
     def __getitem__(self, idx):
-        # Randomly select a file (each sample is independent)
-        file = random.choice(self.valid_files)
-        total_frames = self.frames_per_file[file]
+        """Returns a complete batch without any disk access"""
+        # Get pre-generated batch indices
+        indices = self.batch_indices[idx]
         
-        # Choose a random start such that a chunk of self.chunk_size fits in the file.
-        start_frame = random.randint(0, total_frames - self.chunk_size)
+        # Ultra-fast indexing of RAM-resident tensors
+        gesture_batch = self.gestures[indices]
+        seed_batch = self.seeds[indices]
+        audio_batch = self.audio[indices]
+        speaker_batch = self.speakers[indices]
         
-        # Retrieve data from the file
-        seed_chunk, gesture_chunk, audio_chunk, speaker = self._get_chunk(file, start_frame)
-
-        # Convert to tensors (you may want to consider using `pin_memory=True` when loading data)
-        sample = {
-            "gesture": torch.tensor(gesture_chunk, dtype=torch.float32),
-            "seed": torch.tensor(seed_chunk, dtype=torch.float32),
-            "audio": torch.tensor(audio_chunk, dtype=torch.float32),
-            "speaker": speaker
-        }
-        
-        return sample
-
-    def _worker_cache_init(self, worker_id):
-        """ Initialize worker-specific cache """
-        # Split the files between workers
-        files_per_worker = len(self.valid_files) // torch.utils.data.get_worker_info().num_workers
-        start_idx = worker_id * files_per_worker
-        end_idx = (worker_id + 1) * files_per_worker if worker_id != torch.utils.data.get_worker_info().num_workers - 1 else len(self.valid_files)
-        
-        # Cache the files assigned to this worker
-        self.cached_files = {}
-        for file in self.valid_files[start_idx:end_idx]:
-            self.cached_files[file] = self._load_file_to_cache(file)
-
-    def _load_file_to_cache(self, file):
-        """ Load a file into memory for faster access """
-        with np.load(file, mmap_mode='r') as npz:
-            return npz
-
-    def get_cached_chunk(self, file, start_frame):
-        """ Retrieve a chunk from the cached file """
-        npz = self.cached_files[file]
-        bvh_features = npz["bvh_features"]
-        audio_features = npz["audio_features"]
-        seed_chunk = bvh_features[start_frame : start_frame + self.seed_length_in_frames]
-        gesture_chunk = bvh_features[start_frame + self.seed_length_in_frames : start_frame + self.chunk_size]
-        audio_chunk = audio_features[start_frame + self.seed_length_in_frames : start_frame + self.chunk_size]
-        speaker = npz["main_agent_id_one_hot"]
-        return seed_chunk, gesture_chunk, audio_chunk, speaker
+        return gesture_batch, seed_batch, audio_batch, speaker_batch
