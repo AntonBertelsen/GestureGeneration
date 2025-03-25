@@ -175,6 +175,15 @@ cython_debug/
 DiffuseStyleGestureReproduced/dataset/genea2023_dataset/trn/**/bvh/
 DiffuseStyleGestureReproduced/dataset/genea2023_dataset/trn/**/tsv/
 DiffuseStyleGestureReproduced/dataset/genea2023_dataset/trn/**/wav/
+DiffuseStyleGestureReproduced/dataset/genea2023_dataset/*
+
+
+# Ignore everything inside debug_files/
+DiffuseStyleGestureReproduced/debug_files/*
+
+# Ignore everything inside bvh_tests/
+DiffuseStyleGestureReproduced/bvh_tests/*
+
 
 # Landscape for diffusion test
 DiffuseStyleGestureReproduced/dataset/landscape
