@@ -15,7 +15,6 @@ def extract_audio_features(audio_file):
 
     # Load audio file (with `torchaudio`)
     waveform, wav_sample_rate = torchaudio.load(audio_file, normalize=True)
-    print(f"Sample rate: {wav_sample_rate}")
 
     # We have a problem here: wavlm expects audio at 16kHz, and we want our final features to be at 30fps.
     # For wavlm we unfortunately need to interpolate to 30fps from 50fps which is what wavlm outputs.
@@ -47,18 +46,6 @@ def extract_audio_features(audio_file):
     pitch_derivatives = F.layer_norm(pitch_derivatives, pitch_derivatives.shape)
     wavlm_features = F.layer_norm(wavlm_features, wavlm_features.shape)
 
-    print("Mel spectrogram shape:", mel_spec.shape)
-    print("MFCC shape:", mfcc.shape)
-    print("RMS energy shape:", rms_energy.shape)
-    print("Pitch shape:", pitch.shape)
-    print("Energy derivatives shape:", energy_derivatives.shape)
-    print("Pitch derivatives shape:", pitch_derivatives.shape)
-    print("Onsets shape:", onsets.shape)
-    print("WavLM features shape:", wavlm_features.shape)
-
-
-
-
     # Because the features are not exactly the same length, we need to crop them to the same length. This is a little sketchy, but I think it should be fine
     # It is only 1 or 2 frames differnece typically.
 
@@ -84,8 +71,7 @@ def extract_audio_features(audio_file):
         pitch_derivatives.unsqueeze(1),
         wavlm_features
     ], dim=1)
-
-    print(f"Audio features shape:", audio_features.shape)
+    
     return audio_features.cpu()
 
 
@@ -150,14 +136,9 @@ def extract_wavlm_features(waveform, device):
     inputs = feature_extractor(batch_tensor, return_tensors="pt", sampling_rate=sample_rate)
     inputs["input_values"] = inputs["input_values"].squeeze() # Remove extra dimension which is added by the feature extractor
 
-    # Print the types and shapes to debug
-    print(f"input_values type: {inputs['input_values'].dtype}, shape: {inputs['input_values'].shape}")
-
     # Batch processing does not work with WavLM because the attention mask is not automatically copied across batches when not supplied. 
     # I believe this might be a bug. This line is a hacky way to manually construct the attention mask for the input
     inputs["attention_mask"] = (inputs["input_values"] != 0).to(torch.long)
-
-    print(f"attention_mask type: {inputs['attention_mask'].dtype}, shape: {inputs['attention_mask'].shape}")
 
     # Extract WavLM embeddings
     with torch.no_grad():
@@ -165,13 +146,11 @@ def extract_wavlm_features(waveform, device):
         outputs = model(**inputs)
 
     embeddings = outputs.last_hidden_state  # Shape: [batch, time_steps, hidden_dim]
-    print(embeddings.shape)  # Example: [1, 500, 1024] (depends on audio length)
 
     # Unfortunately wavlm extracts embeddings at 20ms intervals (50 fps), 
     # so we need to downsample to match the sampling rate of the other features (30 fps)
     # (This is an area for possible performance improvement in the future, possibly it is possible to finetune wavlm to extract embeddings at 30fps)
     embeddings_downsampled = F.interpolate(embeddings.permute(0,2,1), size=(duration * 30,), mode="linear", align_corners=False).permute(0,2,1) # permutes are needed because interpolate always works on the last dimension (annoying). But performance impact should be negligible
-    print(embeddings_downsampled.shape) # ([13, 150, 768])
 
     # Now I flatten the tensor to place each batch back one after each other. (How am I sure that it is being reconstructed in the right order?)
     embeddings_flattened = embeddings_downsampled.flatten(start_dim=0, end_dim=1)

@@ -19,7 +19,7 @@ class MocapParameterizer(BaseEstimator, TransformerMixin):
     def __init__(self, param_type = 'euler'):
         '''
         
-        param_type = {'euler', 'quat', 'expmap', 'position', 'expmap2pos'}
+        param_type = {'euler', 'quat', 'expmap', 'position', 'expmap2pos', 'rotmat'}
         '''
         self.param_type = param_type
 
@@ -38,8 +38,10 @@ class MocapParameterizer(BaseEstimator, TransformerMixin):
             return self._to_pos(X)
         elif self.param_type == 'expmap2pos':
             return self._expmap_to_pos(X)
+        elif self.param_type == 'rotmat':
+            return self._to_rotmat(X)
         else:
-            raise 'param types: euler, quat, expmap, position, expmap2pos'
+            raise 'param types: euler, quat, expmap, position, expmap2pos, rotmat'
 
 #        return X
     
@@ -50,11 +52,134 @@ class MocapParameterizer(BaseEstimator, TransformerMixin):
             return self._expmap_to_euler(X)
         elif self.param_type == 'quat':
             raise 'quat2euler is not supported'
+        elif self.param_type == 'rotmat':
+            return self._to_euler(X)
         elif self.param_type == 'position':
             raise 'positions 2 eulers is not supported'
             return X
         else:
             raise 'param types: euler, quat, expmap, position'
+
+    def _to_rotmat(self, X):
+        '''Converts Euler angles to 6D rotation representation'''
+        Q = []
+        for track in X:
+            euler_df = track.values.copy()
+            
+            # Create a new DataFrame to store the rotation matrix rep
+            rotmat_df = pd.DataFrame(index=euler_df.index)
+            
+            # List the columns that contain rotation channels
+            rot_cols = [c for c in euler_df.columns if ('rotation' in c and 'Nub' not in c)]
+            
+            # List the joints that are not end sites, i.e., have channels
+            joints = (joint for joint in track.skeleton if 'Nub' not in joint)
+            
+            # Prepare a dictionary to store the new columns to add at once
+            new_columns = {}
+            
+            for joint in joints:
+                r = euler_df[[c for c in rot_cols if joint in c]]  # Get the columns that belong to this joint
+                
+                # Get the rotation order for this joint
+                rot_order = track.skeleton[joint]['order']
+                
+                # Make sure the columns are organized in xyz order
+                if r.shape[1] < 3:
+                    euler_values = [[0,0,0] for f in r.iterrows()]
+                else:
+                    euler_values = [[f[1]['%s_%srotation'%(joint, rot_order[0])],
+                                    f[1]['%s_%srotation'%(joint, rot_order[1])],
+                                    f[1]['%s_%srotation'%(joint, rot_order[2])]] for f in r.iterrows()]
+                
+                # Convert the eulers to rotation matrices
+                rotmats = R.from_euler(rot_order.lower(), euler_values, degrees=True).as_matrix()
+                
+                # Store only 6 values from each rotation matrix (first 2 rows)
+                for i, frame in enumerate(rotmats):
+                    if i == 0:
+                        # Initialize the columns with zeros
+                        for col_idx in range(6):
+                            new_columns['%s_r%d'%(joint, col_idx+1)] = np.zeros(len(euler_values))
+                    
+                    # Store the first 6 values (first 2 rows)
+                    new_columns['%s_r1'%joint][i] = frame[0, 0]
+                    new_columns['%s_r2'%joint][i] = frame[0, 1]
+                    new_columns['%s_r3'%joint][i] = frame[0, 2]
+                    new_columns['%s_r4'%joint][i] = frame[1, 0]
+                    new_columns['%s_r5'%joint][i] = frame[1, 1]
+                    new_columns['%s_r6'%joint][i] = frame[1, 2]
+            
+            # Add the new rotation matrix columns all at once
+            rotmat_df = pd.concat([rotmat_df, pd.DataFrame(new_columns, index=rotmat_df.index)], axis=1)
+            
+            # Create the new track with the updated DataFrame
+            new_track = track.clone()
+            new_track.values = rotmat_df
+            Q.append(new_track)
+        
+        return Q
+
+    def _to_euler(self, X):
+        '''Converts 6D rotation representation back to Euler angles'''
+        Q = []
+        for track in X:
+            rotmat_df = track.values
+            
+            # Create a new DataFrame to store the euler rep
+            euler_df = pd.DataFrame(index=rotmat_df.index)
+            
+            # List the joints that are not end sites
+            joints = (joint for joint in track.skeleton if 'Nub' not in joint)
+            
+            # Prepare a dictionary to store the new columns to add at once
+            new_columns = {}
+            
+            for joint in joints:
+                # Get the rotation order for this joint
+                rot_order = track.skeleton[joint]['order']
+                
+                # Get the rotation matrix columns for this joint
+                r1 = rotmat_df['%s_r1'%joint].values
+                r2 = rotmat_df['%s_r2'%joint].values
+                r3 = rotmat_df['%s_r3'%joint].values
+                r4 = rotmat_df['%s_r4'%joint].values
+                r5 = rotmat_df['%s_r5'%joint].values
+                r6 = rotmat_df['%s_r6'%joint].values
+                
+                # Reconstruct full rotation matrices
+                num_frames = len(r1)
+                rotmats = np.zeros((num_frames, 3, 3))
+                
+                for i in range(num_frames):
+                    # First two rows directly from stored values
+                    rotmats[i, 0, 0] = r1[i]
+                    rotmats[i, 0, 1] = r2[i]
+                    rotmats[i, 0, 2] = r3[i]
+                    rotmats[i, 1, 0] = r4[i]
+                    rotmats[i, 1, 1] = r5[i]
+                    rotmats[i, 1, 2] = r6[i]
+                    
+                    # Third row is the cross product of the first two rows (orthogonal constraint)
+                    rotmats[i, 2, :] = np.cross(rotmats[i, 0, :], rotmats[i, 1, :])
+                
+                # Convert rotation matrices to Euler angles
+                euler_angles = R.from_matrix(rotmats).as_euler(rot_order.lower(), degrees=True)
+                
+                # Store the euler angles in the new columns dictionary
+                new_columns['%s_%srotation'%(joint, rot_order[0])] = euler_angles[:, 0]
+                new_columns['%s_%srotation'%(joint, rot_order[1])] = euler_angles[:, 1]
+                new_columns['%s_%srotation'%(joint, rot_order[2])] = euler_angles[:, 2]
+            
+            # Add all the new columns at once
+            euler_df = pd.concat([euler_df, pd.DataFrame(new_columns, index=euler_df.index)], axis=1)
+            
+            # Create the new track with the updated DataFrame
+            new_track = track.clone()
+            new_track.values = euler_df
+            Q.append(new_track)
+        
+        return Q
 
     def fix_rotvec(self, rots):
         '''fix problems with discontinuous rotation vectors'''
@@ -82,7 +207,7 @@ class MocapParameterizer(BaseEstimator, TransformerMixin):
             new_rots[intv[ii,0]:intv[ii,1],:] = new_ax*np.tile(new_angs[:, None], (1,3))
 
         return new_rots
-        
+      
     def _to_pos(self, X):
         '''Converts joints rotations in Euler angles to joint positions'''
 

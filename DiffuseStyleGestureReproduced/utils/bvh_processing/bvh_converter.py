@@ -18,7 +18,7 @@ class BVHConverter:
             ('dwnsampl', DownSampler(tgt_fps=30,  keep_all=False)),
             ('jtsel', JointSelector(target_joints, include_root=False)),
             ('pose_relativizer', PoseRelativizer(avg_pose)),
-            ('exp', MocapParameterizer('expmap')),
+            ('rotmat', MocapParameterizer('rotmat')),
             ('posscale', PositionScaler(scale=0.1)),
             ('np', Numpyfier())
         ])

@@ -83,25 +83,20 @@ class BVHParser():
         self.current_token = self.current_token + 1
         self._parse_motion(tokens, start, stop)
         
+        self.data.channel_names = [f"{c[0]}_{c[1]}" for c in self._motion_channels]
         self.data.skeleton = self._skeleton
-        self.data.channel_names = self._motion_channels
-        self.data.values = self._to_DataFrame()
+        self.data.values = self._motions
         self.data.root_name = self.root_name
         self.data.framerate = self.framerate
 
         return self.data
     
-    def _to_DataFrame(self):
-        '''Returns all of the channels parsed from the file as a pandas DataFrame'''
-
-        import pandas as pd
-        time_index = pd.to_timedelta([f[0] for f in self._motions], unit='s')
+    def _to_numpy(self):
+        '''Returns all of the channels parsed from the file as a NumPy array, along with channel names'''
+        
+        # Extract motion values as a NumPy array
         frames = [f[1] for f in self._motions]
-        channels = np.asarray([[channel[2] for channel in frame] for frame in frames])
-        column_names = ['%s_%s'%(c[0], c[1]) for c in self._motion_channels]
-
-        return pd.DataFrame(data=channels, index=time_index, columns=column_names)
-
+        return np.array([[channel[2] for channel in frame] for frame in frames], dtype=np.float32)
 
     def _new_bone(self, parent, name):
         bone = {'parent': parent, 'channels': [], 'offsets': [], 'order': '','children': []}
@@ -214,47 +209,33 @@ class BVHParser():
         self.root_name = root_name
 
     def _parse_motion(self, bvh, start, stop):
-        if bvh[self.current_token][0] != 'IDENT':
-            print('Unexpected text')
-            return None
-        if bvh[self.current_token][1] != 'MOTION':
+        if bvh[self.current_token][0] != 'IDENT' or bvh[self.current_token][1] != 'MOTION':
             print('No motion section')
             return None
-        self.current_token = self.current_token + 1
-        if bvh[self.current_token][1] != 'Frames':
-            return None
-        self.current_token = self.current_token + 1
+        
+        self.current_token += 2  # Skip "Frames" identifier
         frame_count = int(bvh[self.current_token][1])
         
-        if stop<0 or stop>frame_count:
+        if stop < 0 or stop > frame_count:
             stop = frame_count
-            
-        assert(start>=0)
-        assert(start<stop)
+
+        assert start >= 0
+        assert start < stop
         
-        self.current_token = self.current_token + 1
-        if bvh[self.current_token][1] != 'Frame':
-            return None
-        self.current_token = self.current_token + 1
-        if bvh[self.current_token][1] != 'Time':
-            return None
-        self.current_token = self.current_token + 1
-        frame_rate = float(bvh[self.current_token][1])
+        self.current_token += 3  # Skip "Frame Time" line
+        self.framerate = float(bvh[self.current_token][1])
+        
+        self.current_token += 1  # Move to first frame
+        
+        # Preallocate NumPy array (float32 for efficiency)
+        num_frames = stop - start
+        num_channels = len(self._motion_channels)
+        self._motions = np.zeros((num_frames, num_channels), dtype=np.float32)
 
-        self.framerate = frame_rate
-       
-        self.current_token = self.current_token + 1
-       
-        frame_time = 0.0
-        self._motions = [()] * (stop-start)
-        idx=0
         for i in range(stop):
-            channel_values = []
-            for channel in self._motion_channels:
-                channel_values.append((channel[0], channel[1], float(bvh[self.current_token][1])))
-                self.current_token = self.current_token + 1
-
-            if i>=start:
-                self._motions[idx] = (frame_time, channel_values)
-                frame_time = frame_time + frame_rate
-                idx+=1
+            if i >= start:
+                self._motions[i - start] = np.array(
+                    [float(bvh[self.current_token + j][1]) for j in range(num_channels)],
+                    dtype=np.float32
+                )
+            self.current_token += num_channels  # Move to next frame
