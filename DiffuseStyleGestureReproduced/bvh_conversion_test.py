@@ -1,8 +1,18 @@
 from utils.bvh_processing.bvh_converter3 import OffsetBVHParser
 
+target_joints = ['body_world', 'b_root', 'b_r_foot', 'b_l_foot', 'b_l_upleg', 'b_l_leg', 'b_r_upleg', 'b_r_leg', 
+                'b_spine0', 'b_spine1', 'b_spine2', 'b_spine3', 'b_l_shoulder', 'b_l_arm', 'b_l_arm_twist', 
+                'b_l_forearm', 'b_l_wrist_twist', 'b_l_wrist', 'b_l_pinky1', 'b_l_pinky2', 'b_l_pinky3', 'b_l_ring1', 
+                'b_l_ring2', 'b_l_ring3', 'b_l_middle1', 'b_l_middle2', 'b_l_middle3', 'b_l_index1', 'b_l_index2', 
+                'b_l_index3', 'b_l_thumb0', 'b_l_thumb1', 'b_l_thumb2', 'b_l_thumb3', 'b_r_shoulder', 'b_r_arm', 
+                'b_r_arm_twist', 'b_r_forearm', 'b_r_wrist_twist', 'b_r_wrist', 'b_r_thumb0', 'b_r_thumb1', 
+                'b_r_thumb2', 'b_r_thumb3', 'b_r_pinky1', 'b_r_pinky2', 'b_r_pinky3', 'b_r_middle1', 'b_r_middle2', 
+                'b_r_middle3', 'b_r_ring1', 'b_r_ring2', 'b_r_ring3', 'b_r_index1', 'b_r_index2', 'b_r_index3', 
+                'b_neck0', 'b_head']
+
 # Step 1: Load the BVH file
 input_bvh = "bvh_tests/bvh/trn_2023_v0_000_main-agent.bvh"
-parser = OffsetBVHParser(input_bvh)
+parser = OffsetBVHParser(input_bvh, target_joints)
 
 # Print basic information
 joints = parser.get_all_joints()
@@ -15,7 +25,7 @@ print(f"Extracted features shape: {features.shape}")
 print(f"First 5 values of first frame: {features[0, :5]}")
 
 # Step 3: Convert features back to BVH
-output_bvh = "bvh_tests/results/converted_output.bvh"
+output_bvh = "bvh_tests/results/converted_output_2.bvh"
 parser.update_motion_data(features)
 parser.write_bvh(output_bvh)
 
@@ -24,7 +34,7 @@ print(f"Original: {input_bvh}")
 print(f"Result: {output_bvh}")
 
 # Optional: Verify the result by loading the output BVH
-result_parser = OffsetBVHParser(output_bvh)
+result_parser = OffsetBVHParser(output_bvh, target_joints)
 result_features = result_parser.extract_channels()
 
 # Compare shapes
