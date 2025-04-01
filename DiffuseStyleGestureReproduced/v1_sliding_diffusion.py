@@ -23,19 +23,21 @@ class Diffusion:
                  num_of_pre_timestep_frames: int, 
                  num_of_timestep_frames: int, 
                  num_of_post_timestep_frames: int,
-                 noise_schedule: Callable[[int, int], float]):
+                 noise_schedule: Callable[[int, int], float],
+                 device: str):
         
         self.num_of_pre_timestep_frames = num_of_pre_timestep_frames
         self.num_of_timestep_frames = num_of_timestep_frames
         self.num_of_post_timestep_frames = num_of_post_timestep_frames
         self.noise_schedule = noise_schedule
+        self.device = device
 
         # In order to train faster we want to be able to jump to any level of noise at any time.
         # To do this, we precalculate the amount of noise that would have been added at any timestep. This means adding up noise
         # From all previous timesteps. We can cheat by simply scaling beta / alpha
         
         # Precalculate all beta values
-        self.beta_values = torch.tensor([self.noise_schedule(t, self.num_of_timestep_frames) for t in range(self.num_of_timestep_frames + 1)]).to(device)
+        self.beta_values = torch.tensor([self.noise_schedule(t, self.num_of_timestep_frames) for t in range(self.num_of_timestep_frames)]).to(self.device)
         # Alpha is 1 - beta, so here we precalculate all alpha values
         self.alpha_values = 1 - self.beta_values
         # We also precalculate the cumulative product of alpha values. This is what will allow us to jump to any timestep in a single step.
@@ -50,8 +52,12 @@ class Diffusion:
         # Finaly, we precalculate the sqrt_alpha_hat and sqrt_one_minus_alpha_hat vectors for each timestep
         # These vectores are then padded with 1s and 0s in the pre-timestep and post-timestep frames, to ensure that 
         # the pre-timestep frames are not noised, and the post-timestep frames are fully noised, in the forward function.
-        self.sqrt_alpha_hats = [1] * self.num_of_pre_timestep_frames + self.sqrt_alpha_hats + [0] * self.num_of_post_timestep_frames
-        self.sqrt_one_minus_alpha_hats = [0] * self.num_of_pre_timestep_frames + self.sqrt_one_minus_alpha_hats + [1] * self.num_of_post_timestep_frames
+        self.sqrt_alpha_hats = [1] * self.num_of_pre_timestep_frames + self.sqrt_alpha_hats.tolist() + [0] * self.num_of_post_timestep_frames
+        self.sqrt_one_minus_alpha_hats = [0] * self.num_of_pre_timestep_frames + self.sqrt_one_minus_alpha_hats.tolist() + [1] * self.num_of_post_timestep_frames
+
+        # Turn it back into tensors
+        self.sqrt_alpha_hats = torch.tensor(self.sqrt_alpha_hats).to(self.device)
+        self.sqrt_one_minus_alpha_hats = torch.tensor(self.sqrt_one_minus_alpha_hats).to(self.device)
 
         # The underlying math is still
         # noised_squence_collumn = sqrt_alpha_hat * image + sqrt_one_minus_alpha_hat * noise TODO: check this
@@ -63,12 +69,8 @@ class Diffusion:
         # noised_squence_collumn = 0 * squence_collumn + 1 * noise = noise = noise
 
 
-    def forward(self, current_timestep: int, seqence_tensor: torch.Tensor) -> torch.Tensor:
-        
-        # 0 - We should validate the current_timestep. If there is a problem, it would be hard to know otherwise.
-        if not (0 <= current_timestep <= self.num_of_timestep_frames):
-            raise ValueError("current_timestep must be between 0 and max_timesteps")
-        
+    def forward(self, seqence_tensor: torch.Tensor) -> torch.Tensor:
+
         # 1 - We use the provided noise schedule funtion to get the intensity (?) of the noise at the current time step.
         #     This is a value between 0 and 1, and determine the amount of noise to add to the 'image'.
         #     Some noise schedules, like cosine and sigmoid, require a hyperparam, but this is already gien as a paramenter.
@@ -80,7 +82,7 @@ class Diffusion:
         noise = torch.randn_like(seqence_tensor)
 
         # 3 - We use the same device as the 'image' tensor for this noice tensor
-        noise = noise.to(seqence_tensor.device)
+        noise = noise.to(self.device)
         
         # 4 - Compute the noising of the culoumns in the timestep frame section.
         #     We do this by multipling with our pre-prepared sqrt_alpha_hat and sqrt_one_minus_alpha_hat vectores. 

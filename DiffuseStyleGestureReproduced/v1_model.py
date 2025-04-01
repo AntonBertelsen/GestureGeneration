@@ -1,16 +1,8 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-import torch.optim as optim
-import numpy as np
 from local_attention import transformer
 from local_attention.rotary import SinusoidalEmbeddings, apply_rotary_pos_emb
-import matplotlib.pyplot as plt
 from typing import Union
-from io import BytesIO
-from PIL import Image
-from moviepy import ImageSequenceClip
-from datetime import datetime
 
 from v1_sliding_diffusion import Diffusion
 from debugger import Debugger, Show
@@ -201,8 +193,8 @@ class ContinuousMotionModel(nn.Module):
         timestep_0_pos_embedding /= self.max_number_of_time_steps
         timestep_max_pos_embedding /= self.max_number_of_time_steps
 
-        timestep_0_pos_embedding = self.time_step_mlp(timestep_0_pos_embedding)         # (bs, 1, 192)
-        timestep_max_pos_embedding = self.time_step_mlp(timestep_max_pos_embedding)     # (bs, 1, 192)
+        timestep_0_pos_embedding = self.time_step_mlp(timestep_0_pos_embedding)         # (bs, 1, 64)
+        timestep_max_pos_embedding = self.time_step_mlp(timestep_max_pos_embedding)     # (bs, 1, 64)
 
         self.debugger.capture(("timestep_0_pos_embedding", timestep_0_pos_embedding), [Show.MAX_MIN, Show.IMAGE], 
             keys=["timestep_0_pos_embedding", "timesteps_pos_embedding"])
@@ -216,6 +208,9 @@ class ContinuousMotionModel(nn.Module):
 
         self.debugger.capture(("t_for_each_timestep_frame", t_for_each_timestep_frame), [Show.MAX_MIN, Show.IMAGE],
             keys=["t_for_each_timestep_frame", "timesteps_pos_embedding"])
+
+        # We need to rescale the t_for_each_timestep_frame to be between 0 and 1
+        t_for_each_timestep_frame /= self.max_number_of_time_steps
 
         t_with_pos_embedding_for_each_timestep_frame = self.time_step_mlp(t_for_each_timestep_frame)  # (bs, t_for_each_timestep_frame, 192)
 
