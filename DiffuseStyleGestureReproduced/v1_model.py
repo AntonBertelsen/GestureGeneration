@@ -20,9 +20,7 @@ class ContinuousMotionModel(nn.Module):
     def __init__(self, 
                 n_gesture_length: int,                      # Length of the sequence snippets to generate. We geneate in autoregressive manner, where we are constantly generating small chunks continously
                 deffsion_noise_scheduler: Diffusion,
-                number_of_styles: int,                      # Number of unique styles. In this context this is the number of speakers, since we treat each speaker as a style
-                max_number_of_time_steps: int,              # The maximum number of time steps in the diffusion process
-                n_seed_length: int,                         # Length of the seed that we use. The seed is the number of frames from the previously generated sequence in order to make the generation smooth continous  
+                number_of_styles: int,                      # Number of unique styles. In this context this is the number of speakers, since we treat each speaker as a style 
                 audio_features_per_frame: int,              # Number of audio features per frame. This is a mixture of prosodic features, onsets, wavlm, etc.
                 pose_features_per_frame: int, 
                 number_of_attention_heads: int = 8, 
@@ -123,23 +121,22 @@ class ContinuousMotionModel(nn.Module):
         #     dropout=0.1,        # post-attention dropout
         # )
 
+        self.pre_local_attention_linear = nn.Linear(
+            in_features=64 + 64 + 256, 
+            out_features=256
+        )
+
         # The original paper uses single headed local attention (above). However, the implementation supports multiheaded attention
         # We experiment with this to see if it can improve performance.
         self.multi_head_local_attention = transformer.LocalMHA(
-            dim = 576,
-            window_size=15,
-            dim_head=72,
+            dim = 256,
+            window_size=16, # Was 15 in the original paper
+            dim_head=32,
             heads=8,
             dropout = 0.1,
-            causal=True,    # remember that this is something we can experiment with
+            causal=True,    # TODO: remember that this is something we can experiment with
             look_backward = 1,
             look_forward = 0
-        )
-
-
-        self.post_local_attention_linear = nn.Linear(
-            in_features=64 + 64 + 256, 
-            out_features=256
         )
 
         # We reapply the relative positional embeddings before the transformer encoder
@@ -246,14 +243,21 @@ class ContinuousMotionModel(nn.Module):
         style_plus_t_0_pos_embedding = style + timestep_0_pos_embedding
         style_plus_t_max_pos_embedding = style + timestep_max_pos_embedding
 
-        pre_timesteps_style_vectors = style_plus_t_0_pos_embedding.unsqueeze(1).expand(seed_style_t.shape[0], self.num_of_pre_timestep_frames, seed_style_t.shape[1])
-        post_timesteps_style_vectors = style_plus_t_max_pos_embedding.unsqueeze(1).expand(seed_style_t.shape[0], self.num_of_post_timestep_frames, seed_style_t.shape[1])
+        pre_timesteps_style_vectors = style_plus_t_0_pos_embedding.unsqueeze(1).expand(style_plus_t_0_pos_embedding.shape[0], self.num_of_pre_timestep_frames, style_plus_t_0_pos_embedding.shape[1])
+        post_timesteps_style_vectors = style_plus_t_max_pos_embedding.unsqueeze(1).expand(style_plus_t_max_pos_embedding.shape[0], self.num_of_post_timestep_frames, style_plus_t_max_pos_embedding.shape[1])
 
-        style_plus_t_for_each_timestep_frame = t_for_each_timestep_frame + style.unsqueeze(1).expand(seed_style_t.shape[0], self.max_number_of_time_steps, seed_style_t.shape[1])
+        style_plus_t_for_each_timestep_frame = t_for_each_timestep_frame + style.unsqueeze(1).expand(style.shape[0], self.max_number_of_time_steps, style.shape[1])
+
+        self.debugger.capture([("style_plus_t_0_pos_embedding", style_plus_t_0_pos_embedding), 
+                               ("style_plus_t_max_pos_embedding", style_plus_t_max_pos_embedding),
+                               ("style_plus_t_for_each_timestep_frame", style_plus_t_for_each_timestep_frame)], 
+                               [Show.MAX_MIN, Show.IMAGE], 
+                               keys=["style_plus_t_0_pos_embedding", "style", "timesteps_pos_embedding"])
 
         # 1.3.2 - concatenate the pre-timesteps, the style, and the post-timesteps
         style_t_frames = torch.cat([pre_timesteps_style_vectors, style_plus_t_for_each_timestep_frame, post_timesteps_style_vectors], dim=1)
 
+        self.debugger.capture(("style_t_frames", style_t_frames), [Show.MAX_MIN, Show.IMAGE], keys=["style_t_frames", "style", "timesteps_pos_embedding"])    
 
         # 1.4 - Prepare the audio features tensor
         #       Apply a linear layer to get a tensor of shape (bs, N, 64) - every column is the features for that frame
@@ -286,9 +290,18 @@ class ContinuousMotionModel(nn.Module):
         #       To get a tensor of shape (576, N) (Could be nicer)
         #       This gives us the 'input' for the model
 
-        input = torch.cat([style_t_frames, audio_noisy_gesture], dim=-1)
+        full_data_tensor = torch.cat([style_t_frames, audio_noisy_gesture], dim=-1)
 
-        self.debugger.capture(("input to attention layers", input), [Show.MAX_MIN, Show.IMAGE], keys="input")
+        self.debugger.capture(("The final combied tensor of all the data", input), [Show.MAX_MIN, Show.IMAGE], keys="full_data_tensor")
+
+        # 2.5 - Srink and mix the full_data_tensor to get a more compressed, optimsied tensor for the attention layers
+        #       We apply a linear layer to get a tensor of shape (bs, N, 256)
+
+        input = self.pre_local_attention_linear(full_data_tensor)
+
+        self.debugger.capture(("input after pre_local_attention_linear", input), [Show.MAX_MIN, Show.IMAGE], keys=["attention_input", "pre_local_attention_linear"])
+
+        # TODO: consider normaliseing the data
 
         # 3 - The Attention layers
 
@@ -310,32 +323,8 @@ class ContinuousMotionModel(nn.Module):
 
         self.debugger.capture(("local_attention_output", local_attention_output), [Show.MAX_MIN, Show.IMAGE], keys="local_attention_output")
 
-        # 3.3 - Pass the output of the local attention to a linear layer 
-        #       to get a tensor of shape (256, N)
-        post_local_attention = self.post_local_attention_linear(local_attention_output)
 
-        self.debugger.capture(("post_local_attention", post_local_attention), [Show.MAX_MIN, Show.IMAGE], keys="post_local_attention")
-
-        # We need to add a dimension which is the frame dimension - We are in a sense inventing a fake frame
-        # which we will concatenate.
-        seed_style_t = seed_style_t.unsqueeze(1)
-
-        # 3.4 - Concatenate the output of the linear layer with the seed_style_t
-        #       To get a tensor of shape (256, N+1)
-        #       the extra 1 is from the seed_style_t, which includes concatenation of the seed gesture and style (speaker id)
-        #       The model will need to learn to treat this frame differently
-        #       One annoying aspect of this is that we will always end up with an ugly number of frames, which is not good for
-        #       perforamnce according to kaparthy's "nice" and "ugly" numbers.
-        #       Maybe we can investigate if we can do something about this.
-
-        self.debugger.capture(("seed_style_t", seed_style_t), Show.MAX_MIN, keys="seed_style_t")
-        
-        combined_tensor = torch.cat([seed_style_t, post_local_attention], dim=1)
-
-        self.debugger.capture(("combined_tensor of seed_style_t and post_local_attention", combined_tensor), 
-                            [Show.MAX_MIN, Show.IMAGE], keys="combined_tensor")
-
-        # 3.5 - Apply a self attention layer to the tensor of shape (256, N+1)
+        # 3.3 - Apply a self attention layer to the tensor of shape (256, N+1)
         #       We now apply full self attention. The paper and illustration makes it look as though we are applying a single
         #       self attention layer, but the code seems to actually apply a full 8 layer encoder transformer model.
         #       This is a little surprising to us. 
@@ -353,7 +342,7 @@ class ContinuousMotionModel(nn.Module):
 
         self.debugger.capture(("transformer_encoder_output", transformer_encoder_output), [Show.MAX_MIN, Show.IMAGE], keys="transformer_encoder_output")
 
-        # 3.6 - Pass the output of the self attention layer to a linear layer,
+        # 3.4 - Pass the output of the self attention layer to a linear layer,
         #       to get a tensor of shape (1141, N)
         output_tensor = self.final_linear(transformer_encoder_output)
 
