@@ -175,6 +175,18 @@ cython_debug/
 DiffuseStyleGestureReproduced/dataset/genea2023_dataset/trn/**/bvh/
 DiffuseStyleGestureReproduced/dataset/genea2023_dataset/trn/**/tsv/
 DiffuseStyleGestureReproduced/dataset/genea2023_dataset/trn/**/wav/
+DiffuseStyleGestureReproduced/dataset/genea2023_dataset/trn/**/wav/
+DiffuseStyleGestureReproduced/dataset/genea2023_dataset/trn/**/features/
+DiffuseStyleGestureReproduced/dataset/genea2023_dataset/*
+DiffuseStyleGestureReproduced/dataset/*
+
+
+# Ignore everything inside debug_files/
+DiffuseStyleGestureReproduced/debug_files/*
+
+# Ignore everything inside bvh_tests/
+DiffuseStyleGestureReproduced/bvh_tests/*
+
 
 # Landscape for diffusion test
 DiffuseStyleGestureReproduced/dataset/landscape
@@ -184,3 +196,4 @@ data_pipe.sav
 
 
 .DS_Store
+DiffuseStyleGestureReproduced/dataset/genea2023_dataset/trn/main-agent/features/trn_2023_v0_000.npz

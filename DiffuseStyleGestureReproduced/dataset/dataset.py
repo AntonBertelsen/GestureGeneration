@@ -304,12 +304,6 @@ class ConsolidatedRAMDataset(Dataset):
         with open(meta_file, 'rb') as f:
             self.metadata = pickle.load(f)
         
-        print(f"Loading consolidated data from {consolidated_file}")
-        start_time = torch.cuda.Event(enable_timing=True)
-        end_time = torch.cuda.Event(enable_timing=True)
-        
-        start_time.record()
-        
         # Load the entire dataset into RAM
         data = np.load(consolidated_file)
         
@@ -322,11 +316,6 @@ class ConsolidatedRAMDataset(Dataset):
         
         # Close numpy file to free file handles
         data.close()
-        
-        end_time.record()
-        torch.cuda.synchronize()
-        
-        print(f"Data loaded into RAM in {start_time.elapsed_time(end_time)/1000:.2f} seconds")
 
         # print("Mean pose is ", self.mean_pose)
         # print("Std pose is ", self.std_pose)
