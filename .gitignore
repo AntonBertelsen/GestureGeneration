@@ -175,7 +175,10 @@ cython_debug/
 DiffuseStyleGestureReproduced/dataset/genea2023_dataset/trn/**/bvh/
 DiffuseStyleGestureReproduced/dataset/genea2023_dataset/trn/**/tsv/
 DiffuseStyleGestureReproduced/dataset/genea2023_dataset/trn/**/wav/
+DiffuseStyleGestureReproduced/dataset/genea2023_dataset/trn/**/wav/
+DiffuseStyleGestureReproduced/dataset/genea2023_dataset/trn/**/features/
 DiffuseStyleGestureReproduced/dataset/genea2023_dataset/*
+DiffuseStyleGestureReproduced/dataset/*
 
 
 # Ignore everything inside debug_files/
