@@ -12,6 +12,8 @@ from PIL import Image
 from moviepy import ImageSequenceClip
 from datetime import datetime
 
+from einops import rearrange
+
 
 import math
 from typing import Callable
@@ -59,6 +61,9 @@ class Diffusion:
         self.sqrt_alpha_hats = torch.tensor(self.sqrt_alpha_hats).to(self.device)
         self.sqrt_one_minus_alpha_hats = torch.tensor(self.sqrt_one_minus_alpha_hats).to(self.device)
 
+        print("sqrt_alpha_hats", self.sqrt_alpha_hats.shape, self.sqrt_alpha_hats)
+        print("sqrt_one_minus_alpha_hats", self.sqrt_one_minus_alpha_hats.shape, self.sqrt_one_minus_alpha_hats)
+
         # The underlying math is still
         # noised_squence_collumn = sqrt_alpha_hat * image + sqrt_one_minus_alpha_hat * noise TODO: check this
         #
@@ -98,9 +103,24 @@ class Diffusion:
         #     For the post-timestep frames, the sqrt_alpha_hat is 0, and the sqrt_one_minus_alpha_hat is 1:
         #     noised_squence_collumn = 0 * squence_collumn + 1 * noise = noise = noise
 
+        # print("seqence_tensor", seqence_tensor.shape, seqence_tensor)
+        # print("noise", noise.shape, noise)
+        # print("sqrt_alpha_hats", self.sqrt_alpha_hats.shape, self.sqrt_alpha_hats)
+        # print("sqrt_one_minus_alpha_hats", self.sqrt_one_minus_alpha_hats.shape, self.sqrt_one_minus_alpha_hats)
 
-        # Calculate the noised seqence_tensor
+        if len(seqence_tensor.shape) == 3:
+            # If the input is a 3D tensor, we need to add a batch dimension
+            self.sqrt_alpha_hats = self.sqrt_alpha_hats.unsqueeze(1)
+            self.sqrt_one_minus_alpha_hats = self.sqrt_one_minus_alpha_hats.unsqueeze(1)
+        
+        # print("AFTER seqence_tensor", seqence_tensor.shape, seqence_tensor)
+        # print("AFTER noise", noise.shape, noise)
+        # print("AFTER sqrt_alpha_hats", self.sqrt_alpha_hats.shape, self.sqrt_alpha_hats)
+        # print("AFTER sqrt_one_minus_alpha_hats", self.sqrt_one_minus_alpha_hats.shape, self.sqrt_one_minus_alpha_hats)
+
         noised_image = self.sqrt_alpha_hats * seqence_tensor + self.sqrt_one_minus_alpha_hats * noise
+
+        # print("noised_image", noised_image.shape, noised_image)
         
         return noised_image
 

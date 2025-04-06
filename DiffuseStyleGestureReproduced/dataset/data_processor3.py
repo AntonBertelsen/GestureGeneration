@@ -13,7 +13,12 @@ class DataProcessor:
         self.metadata_file = metadata_file
         self.output_dir = output_dir
         self.features_dir = os.path.join(output_dir, "features")
+        
+        # Ensure the directory exists and is writable
+try:
         os.makedirs(self.features_dir, exist_ok=True)
+except PermissionError as e:
+            raise PermissionError(f"Unable to create directory '{self.features_dir}'. Check permissions.") from e
         
         # Load metadata and files
         self.metadata = self._load_metadata()
@@ -223,5 +228,5 @@ if __name__ == "__main__":
     output_dir = 'dataset/genea2023_dataset/trn/main-agent'
     
     processor = DataProcessor(bvh_dir, wav_dir, metadata_file, output_dir)
-    # processor.process_files()
+    processor.process_files()
     processor.create_consolidated_data()

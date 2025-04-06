@@ -10,6 +10,7 @@ from debugger import Debugger, Show
 
 class ContinuousMotionModel(nn.Module):
     def __init__(self, 
+                device,
                 n_gesture_length: int,                      # Length of the sequence snippets to generate. We geneate in autoregressive manner, where we are constantly generating small chunks continously
                 deffsion_noise_scheduler: Diffusion,
                 number_of_styles: int,                      # Number of unique styles. In this context this is the number of speakers, since we treat each speaker as a style 
@@ -18,15 +19,16 @@ class ContinuousMotionModel(nn.Module):
                 number_of_attention_heads: int = 8, 
                 debugger: Debugger = Debugger(False)):      # Number of pose features per frame. These are the rotations / translations of the bones in the character skeleton. We may not pay attention to every channel for every bone, or every bone. 
         super().__init__()
-
+        self.device = device
         self.debugger = debugger
+        self.deffsion_noise_scheduler = deffsion_noise_scheduler
 
         self.n_gesture_length = n_gesture_length
         self.num_of_pre_timestep_frames = deffsion_noise_scheduler.num_of_pre_timestep_frames
-        self.max_number_of_time_steps = deffsion_noise_scheduler.num_of_timestep_frames
+        self.num_of_timestep_frames = deffsion_noise_scheduler.num_of_timestep_frames
         self.num_of_post_timestep_frames = deffsion_noise_scheduler.num_of_post_timestep_frames
 
-        assert(self.num_of_pre_timestep_frames + self.n_gesture_length + self.num_of_post_timestep_frames == self.max_number_of_time_steps)
+        assert(self.num_of_pre_timestep_frames + self.num_of_timestep_frames + self.num_of_post_timestep_frames == self.n_gesture_length)
         
         self.number_of_attention_heads = number_of_attention_heads
 
@@ -154,21 +156,23 @@ class ContinuousMotionModel(nn.Module):
 
 
     def forward(self, 
-                t_current_diffusion_time_step,
-                seed_gesture, 
                 one_hot_style, 
                 audio_features, 
                 noisy_gesture_sequence,
                 condition_mask_probabilty = 0.1):
 
-        self.debugger.capture([
-            ("t_current_diffusion_time_step", t_current_diffusion_time_step), 
-            ("seed_gesture", seed_gesture), 
+        self.debugger.capture([  
             ("one_hot_style", one_hot_style), 
             ("audio_features", audio_features), 
             ("noisy_gesture_sequence", noisy_gesture_sequence)], 
             [Show.MAX_MIN,], 
             keys=["input_analysis"])
+
+        # Ensure all inputs have the same dtype as the model weights
+        weight_dtype = self.audio_linear.weight.dtype
+        one_hot_style = one_hot_style.to(weight_dtype)
+        audio_features = audio_features.to(weight_dtype)
+        noisy_gesture_sequence = noisy_gesture_sequence.to(weight_dtype)
 
         # 1.1 - Prepare the diffusion time steps t, associated with eatch frame in the sequence
 
@@ -186,15 +190,12 @@ class ContinuousMotionModel(nn.Module):
 
         # 1.1.2 - first make the position embedding for timestep 0 and max_number_of_time_steps + 1
 
-        timestep_0_pos_embedding = self.time_step_mlp(torch.tensor([0.0]))  # (bs, 1, 1)
-        timestep_max_pos_embedding = self.time_step_mlp(torch.tensor([self.max_number_of_time_steps + 1]))  # (bs, 1, 1)
+        timestep_0_pos_embedding = self.time_step_mlp(torch.tensor([0.0]))  # (bs, 1, 1) -> (bs, 1, 64)
+        timestep_max_pos_embedding = self.time_step_mlp(torch.tensor([float(self.num_of_timestep_frames)]))  # (bs, 1, 1) -> (bs, 1, 64)
 
         # We rescale them to be between 0 and 1 to make it easier for the MLP positional embedding to learn
-        timestep_0_pos_embedding /= self.max_number_of_time_steps
-        timestep_max_pos_embedding /= self.max_number_of_time_steps
-
-        timestep_0_pos_embedding = self.time_step_mlp(timestep_0_pos_embedding)         # (bs, 1, 64)
-        timestep_max_pos_embedding = self.time_step_mlp(timestep_max_pos_embedding)     # (bs, 1, 64)
+        timestep_0_pos_embedding /= self.num_of_timestep_frames
+        timestep_max_pos_embedding /= self.num_of_timestep_frames
 
         self.debugger.capture(("timestep_0_pos_embedding", timestep_0_pos_embedding), [Show.MAX_MIN, Show.IMAGE], 
             keys=["timestep_0_pos_embedding", "timesteps_pos_embedding"])
@@ -203,14 +204,14 @@ class ContinuousMotionModel(nn.Module):
 
         # 1.1.3 - Then we make the positional embedding each of the timestep frames in the sequence
 
-        t_for_each_timestep_frame = torch.arange(self.max_number_of_time_steps).unsqueeze(-1).float()  # (bs, t_for_each_timestep_frame, 1)
+        t_for_each_timestep_frame = torch.arange(self.num_of_timestep_frames).unsqueeze(-1).float()  # (bs, t_for_each_timestep_frame, 1)
         # TODO: tjeck if this works with bs dim
 
         self.debugger.capture(("t_for_each_timestep_frame", t_for_each_timestep_frame), [Show.MAX_MIN, Show.IMAGE],
             keys=["t_for_each_timestep_frame", "timesteps_pos_embedding"])
 
         # We need to rescale the t_for_each_timestep_frame to be between 0 and 1
-        t_for_each_timestep_frame /= self.max_number_of_time_steps
+        t_for_each_timestep_frame /= self.num_of_timestep_frames
 
         t_with_pos_embedding_for_each_timestep_frame = self.time_step_mlp(t_for_each_timestep_frame)  # (bs, t_for_each_timestep_frame, 192)
 
@@ -241,7 +242,7 @@ class ContinuousMotionModel(nn.Module):
         pre_timesteps_style_vectors = style_plus_t_0_pos_embedding.unsqueeze(1).expand(style_plus_t_0_pos_embedding.shape[0], self.num_of_pre_timestep_frames, style_plus_t_0_pos_embedding.shape[1])
         post_timesteps_style_vectors = style_plus_t_max_pos_embedding.unsqueeze(1).expand(style_plus_t_max_pos_embedding.shape[0], self.num_of_post_timestep_frames, style_plus_t_max_pos_embedding.shape[1])
 
-        style_plus_t_for_each_timestep_frame = t_for_each_timestep_frame + style.unsqueeze(1).expand(style.shape[0], self.max_number_of_time_steps, style.shape[1])
+        style_plus_t_for_each_timestep_frame = t_for_each_timestep_frame + style.unsqueeze(1).expand(style.shape[0], self.num_of_timestep_frames, style.shape[1])
 
         self.debugger.capture([("style_plus_t_0_pos_embedding", style_plus_t_0_pos_embedding), 
                                ("style_plus_t_max_pos_embedding", style_plus_t_max_pos_embedding),
@@ -259,7 +260,7 @@ class ContinuousMotionModel(nn.Module):
         #       TODO: Consider making this 128 to make the final tenser of shape (bs, N, 640) (Nice number)
 
         self.debugger.capture(("audio_features BEFORE audio_linear", audio_features), [Show.MAX_MIN, Show.IMAGE], keys="audio_features")
-
+        
         audio_features = self.audio_linear(audio_features)
 
         self.debugger.capture(("audio_features AFTER audio_linear", audio_features), [Show.MAX_MIN, Show.IMAGE], keys="audio_features")
@@ -287,7 +288,7 @@ class ContinuousMotionModel(nn.Module):
 
         full_data_tensor = torch.cat([style_t_frames, audio_noisy_gesture], dim=-1)
 
-        self.debugger.capture(("The final combied tensor of all the data", input), [Show.MAX_MIN, Show.IMAGE], keys="full_data_tensor")
+        self.debugger.capture(("The final combied tensor of all the data", full_data_tensor), [Show.MAX_MIN, Show.IMAGE], keys="full_data_tensor")
 
         # 2.5 - Srink and mix the full_data_tensor to get a more compressed, optimsied tensor for the attention layers
         #       We apply a linear layer to get a tensor of shape (bs, N, 256)
@@ -328,12 +329,12 @@ class ContinuousMotionModel(nn.Module):
         #       We will have N+1 frames in the sequence. We will ignore the first frame output ([:,1:]) from the transformer, 
         #       since it is the seed_style_t frame. This is in accordance with the implementation from the original paper.
 
-        relative_positional_embedding, scale = self.relative_positional_embedding_funtion(combined_tensor)
-        combined_tensor, _ = apply_rotary_pos_emb(combined_tensor, combined_tensor, relative_positional_embedding, scale)
+        relative_positional_embedding, scale = self.relative_positional_embedding_funtion(local_attention_output)
+        local_attention_output, _ = apply_rotary_pos_emb(local_attention_output, local_attention_output, relative_positional_embedding, scale)
 
-        self.debugger.capture(("combined_tensor with RPE", combined_tensor), [Show.MAX_MIN, Show.IMAGE], keys="combined_tensor")
+        self.debugger.capture(("combined_tensor with RPE", local_attention_output), [Show.MAX_MIN, Show.IMAGE], keys="combined_tensor")
 
-        transformer_encoder_output = self.transformer_encoder(combined_tensor)[:,1:]
+        transformer_encoder_output = self.transformer_encoder(local_attention_output)
 
         self.debugger.capture(("transformer_encoder_output", transformer_encoder_output), [Show.MAX_MIN, Show.IMAGE], keys="transformer_encoder_output")
 

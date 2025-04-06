@@ -11,12 +11,16 @@ from io import BytesIO
 from PIL import Image
 from moviepy import ImageSequenceClip
 from datetime import datetime
-
+from torch.amp import GradScaler, autocast
 
 from tqdm import tqdm
 from IPython.display import clear_output
 import time
 from collections import defaultdict
+
+
+
+from v1_sliding_diffusion import Diffusion
 
 # This is mostly created by combining elements from Solved_MLP_mnist_tensorflow-pytorch.ipynb 
 # and SOLUTION_Convolutional_networks.ipynb from the applied AI course.
@@ -44,7 +48,8 @@ def acceleration_loss(pred, gt):
 
 def train(
         model,
-        diffusion,
+        diffusion: Diffusion,
+        device,
         training_loader,
         val_loader, 
         num_epochs: int, 
@@ -59,6 +64,9 @@ def train(
     visalize_step = 50  # How often to print profiling stats
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
+    
+    # Add gradient scaler for mixed precision training
+    scaler = GradScaler()
 
     torch.set_float32_matmul_precision('high')
     
@@ -124,23 +132,27 @@ def train(
 
             # Diffusion time
             diffusion_start = time.time()
-            t_current_diffusion_time_step = torch.randint(0, diffusion.max_timesteps, (1, 1)).to(device)
             noisy_gesture_sequence = diffusion.forward(
-                current_timestep = t_current_diffusion_time_step, 
-                image = gesture_sequence
+                seqence_tensor=gesture_sequence
             )
             diffusion_time = time.time() - diffusion_start
             profiling["diffusion_forward"].append(diffusion_time)
 
+            # Zero gradients before forward pass (best practice)
+            optimizer.zero_grad()
+
             # Model forward time
             forward_start = time.time()
-            with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+            with autocast(device_type='cuda', dtype=torch.bfloat16):
+                # Convert all inputs to same precision as autocast context
+                main_agent_id_one_hot_casted = main_agent_id_one_hot.to(torch.bfloat16)
+                audio_features_casted = audio_features.to(torch.bfloat16)
+                noisy_gesture_sequence_casted = noisy_gesture_sequence.to(torch.bfloat16)
+                
                 output = model(
-                    t_current_diffusion_time_step = t_current_diffusion_time_step.float(),
-                    seed_gesture = seed_gesture, 
-                    one_hot_style = main_agent_id_one_hot.float(),
-                    audio_features = audio_features, 
-                    noisy_gesture_sequence = noisy_gesture_sequence,
+                    one_hot_style = main_agent_id_one_hot_casted,
+                    audio_features = audio_features_casted, 
+                    noisy_gesture_sequence = noisy_gesture_sequence_casted,
                     condition_mask_probabilty = condition_mask_probabilty,
                 )
             forward_time = time.time() - forward_start
@@ -148,11 +160,15 @@ def train(
 
             # Loss calculation time
             loss_start = time.time()
-            with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
-                loss = loss_f(output, gesture_sequence) 
-                loss += variance_loss(output, gesture_sequence) * variance_loss_weight 
-                loss += velocity_loss(output, gesture_sequence) * velocity_loss_weight 
-                loss += acceleration_loss(output, gesture_sequence) * acceleration_loss_weight
+            with autocast(device_type='cuda', dtype=torch.bfloat16):
+                # Cast the target tensor to the same precision as output
+                gesture_sequence_casted = gesture_sequence.to(torch.bfloat16)
+                
+                # Use the casted target for all loss calculations
+                loss = loss_f(output, gesture_sequence_casted) 
+                loss += variance_loss(output, gesture_sequence_casted) * variance_loss_weight 
+                loss += velocity_loss(output, gesture_sequence_casted) * velocity_loss_weight 
+                loss += acceleration_loss(output, gesture_sequence_casted) * acceleration_loss_weight
             loss_time = time.time() - loss_start
             profiling["loss_calculation"].append(loss_time)
 
@@ -188,7 +204,7 @@ def train(
                 axs[1].text(10, 210, f"Mean: {torch.mean(gesture_sequence):.4f}", color="black")
 
                 axs[2].imshow(noisy_gesture_sequence.to(torch.float32).permute(0, 2, 1)[0, :, :].cpu().detach().numpy(), cmap=cmap, vmin=vmin, vmax=vmax)
-                axs[2].set_title("Noisy gesture starting point at t = " + str(t_current_diffusion_time_step.item()))
+                axs[2].set_title("Noisy gesture starting point")
                 axs[2].text(10, 190, f"Max: {torch.max(noisy_gesture_sequence):.4f}", color="black")
                 axs[2].text(10, 200, f"Min: {torch.min(noisy_gesture_sequence):.4f}", color="black")
                 axs[2].text(10, 210, f"Mean: {torch.mean(noisy_gesture_sequence):.4f}", color="black")
@@ -235,14 +251,16 @@ def train(
 
             # Backward pass time
             backward_start = time.time()
-            optimizer.zero_grad()
-            loss.backward()
+            # Use the scaler to handle the backward pass with mixed precision
+            scaler.scale(loss).backward()
             backward_time = time.time() - backward_start
             profiling["backward"].append(backward_time)
 
             # Optimizer step time
             optimizer_start = time.time()
-            optimizer.step()
+            # Use the scaler for optimizer step
+            scaler.step(optimizer)
+            scaler.update()
             optimizer_time = time.time() - optimizer_start
             profiling["optimizer"].append(optimizer_time)
             
