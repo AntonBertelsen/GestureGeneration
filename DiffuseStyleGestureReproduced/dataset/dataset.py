@@ -118,6 +118,108 @@ class OverlapAnimationDataset(Dataset):
         }
         return sample
     
+class SingleSampleAnimationDataset(Dataset):
+    def __init__(self, folder, seq_length_in_frames=150, seed_length_in_frames=8, 
+                 batch_size=1, epoch_length=1):
+        """
+        A dataset that returns a single sample with a random starting frame and a random file.
+        Useful for debugging. Returns data in the same format as ConsolidatedRAMDataset.
+        
+        Args:
+            folder (str): Path to folder containing .npz files.
+            seq_length_in_frames (int): Length of the gesture sequence in frames.
+            seed_length_in_frames (int): Length of the seed sequence in frames.
+        """
+        self.folder = folder
+        self.seq_length_in_frames = seq_length_in_frames
+        self.seed_length_in_frames = seed_length_in_frames
+        self.chunk_size = seq_length_in_frames + seed_length_in_frames
+        self.epoch_length = epoch_length
+        self.batch_size = batch_size
+        
+        # List all npz files
+        self.files = [os.path.join(folder, f) for f in os.listdir(folder) if f.endswith('.npz')]
+        if not self.files:
+            raise ValueError("No .npz files found in the provided folder.")
+        
+        # Load statistics for normalization. These are saved in a file called stats.npz one folder up from the dataset folder
+        stats_file = os.path.join(os.path.dirname(folder), "statistics.npz")
+        if os.path.exists(stats_file):
+            with np.load(stats_file) as npz:
+                print("Loaded statistics for normalization")
+                self.mean_pose = npz["mean_pose"]
+                self.std_pose = npz["std_pose"]
+        
+        self.mean_pose = torch.tensor(self.mean_pose, dtype=torch.float16)
+        self.std_pose = torch.tensor(self.std_pose, dtype=torch.float16)
+
+    def __len__(self):
+        return self.epoch_length
+
+    def __getitem__(self, idx):
+        # Randomly select a file
+        file = random.choice(self.files)
+        
+        with np.load(file) as npz:
+            total_frames = npz["bvh_features"].shape[0]
+            if total_frames < self.chunk_size:
+                raise ValueError(f"File {file} does not have enough frames.")
+            
+            # Choose a random start frame such that a chunk of self.chunk_size fits in the file
+            start_frame = random.randint(0, total_frames - self.chunk_size)
+            
+            gesture_chunk = npz["bvh_features"][start_frame + self.seed_length_in_frames : start_frame + self.chunk_size]
+            seed_chunk = npz["bvh_features"][start_frame : start_frame + self.seed_length_in_frames]
+            audio_chunk = npz["audio_features"][start_frame + self.seed_length_in_frames : start_frame + self.chunk_size]
+            speaker = npz["main_agent_id_one_hot"]
+        
+        # Convert to half precision for consistency with ConsolidatedRAMDataset
+        gesture = torch.tensor(gesture_chunk, dtype=torch.float16)
+        seed = torch.tensor(seed_chunk, dtype=torch.float16)
+        audio = torch.tensor(audio_chunk, dtype=torch.float16)
+        speaker = torch.tensor(speaker, dtype=torch.float16)
+        
+        # Apply normalization to gestures
+        gesture = (gesture - self.mean_pose) / self.std_pose
+        seed = (seed - self.mean_pose) / self.std_pose
+
+        gesture_batch = gesture.repeat(self.batch_size, 1, 1)
+        seed_batch = seed.repeat(self.batch_size, 1, 1)
+        audio_batch = audio.repeat(self.batch_size, 1, 1)
+        speaker_batch = speaker.repeat(self.batch_size, 1)
+
+        ##################################################################################
+        # WAV FILE EXTRACTION
+        ##################################################################################
+        
+        # Find the corresponding wav file in the 'wav' folder and extract the corresponding time
+        print(file)
+        wav_file = os.path.join(os.path.dirname(os.path.dirname(file)), 'wav', os.path.basename(file).replace('.npz', '_main-agent.wav'))
+        if not os.path.exists(wav_file):
+            raise ValueError(f"Corresponding wav file {wav_file} not found.")
+
+        # Read the wav file
+        audio_data, samplerate = sf.read(wav_file)
+
+        # Calculate the start and end times in seconds
+        start_time = start_frame / 30.0
+        end_time = (start_frame + self.chunk_size) / 30.0
+
+        # Extract the corresponding audio snippet
+        start_sample = int(start_time * samplerate)
+        end_sample = int(end_time * samplerate)
+        audio_snippet = audio_data[start_sample:end_sample]
+
+        # Save the audio snippet one folder up from the dataset folder
+        output_wav_file = os.path.join(os.path.dirname(self.folder), 'audio_snippet.wav')
+        sf.write(output_wav_file, audio_snippet, samplerate)
+
+        ##################################################################################
+        # WAV FILE EXTRACTION
+        ##################################################################################
+        
+        return gesture_batch, seed_batch, audio_batch, speaker_batch
+
 class FixedSampleAnimationDataset(Dataset):
     def __init__(self, folder, seq_length_in_frames=150, seed_length_in_frames=8, 
                  batch_size=1, epoch_length=10000, start_frame=0):
@@ -186,6 +288,7 @@ class FixedSampleAnimationDataset(Dataset):
         return gesture_batch, seed_batch, audio_batch, speaker_batch
 
 import pickle
+import soundfile as sf
 class ConsolidatedRAMDataset(Dataset):
     """Dataset that loads consolidated data into RAM and extracts windows on-the-fly"""
     def __init__(self, consolidated_file, seq_length=150, seed_length=8, 
