@@ -1,22 +1,16 @@
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
 import torch.optim as optim
+import torch.nn as nn
 import numpy as np
-from local_attention import transformer
-from local_attention.rotary import SinusoidalEmbeddings, apply_rotary_pos_emb
 import matplotlib.pyplot as plt
-from typing import Union
-from io import BytesIO
-from PIL import Image
-from moviepy import ImageSequenceClip
-from datetime import datetime
-from torch.amp import GradScaler, autocast
+from torch.amp import autocast
 
 from tqdm import tqdm
 from IPython.display import clear_output
 import time
 from collections import defaultdict
+
+import wandb
 
 
 
@@ -47,6 +41,7 @@ def acceleration_loss(pred, gt):
     return torch.mean((acc_pred - acc_gt) ** 2)
 
 def train(
+        run_type: str, # Test, 
         model,
         diffusion: Diffusion,
         device,
@@ -58,15 +53,70 @@ def train(
         variance_loss_weight=0.1,
         velocity_loss_weight=0.1,
         acceleration_loss_weight=0.1):
+    
+    """
+    ContinuousMotionModel(
+        deffsion_noise_scheduler=Diffusion(
+            device=device,
+            num_of_pre_timestep_frames=50,
+            num_of_timestep_frames=100,
+            num_of_post_timestep_frames=0,
+            noise_schedule=Diffusion.linear_schedule(0.0002, 0.005)),
+        number_of_styles = 17,
+        n_gesture_length = 150,
+        audio_features_per_frame = 804,
+        pose_features_per_frame = 345,
+        number_of_attention_heads = 8,
+        debugger = Debugger(
+            on=True, 
+            keys_for_printing_while_running=["ALL"]
+        ),
+        device=device,
+    )
+    """
+    
+    # initialise a wandb (weighs and biases) run tracker
+    wandb.init(project="v1_sliding_diffusion", 
+               entity="",
+               config={
+                   # Experiment params: 
+                   "experiment_type": run_type,
+
+                    # Training hyper parameters
+                    "epochs": num_epochs,
+                    "batch_size": training_loader.batch_size,
+                    "learning_rate": lr,
+                    "optimizer": "AdamW",
+                    "variance_loss_weight": variance_loss_weight,
+                    "velocity_loss_weight": velocity_loss_weight,
+                    "acceleration_loss_weight": acceleration_loss_weight,
+
+                    # Data hyper params:
+                    "float_precision_or_type": "Halvs",
+
+                    # Model hyper parameters
+                    "number_of_styles": model.number_of_styles,
+                    "n_gesture_length": model.n_gesture_length,
+                    "audio_features_per_frame": model.audio_features_per_frame,
+                    "pose_features_per_frame": model.pose_features_per_frame,
+                    "number_of_attention_heads": model.number_of_attention_heads,
+                    "condition_mask_probabilty": condition_mask_probabilty,
+
+                    # Noising hyper parameters
+                    "num_of_pre_timestep_frames": model.deffsion_noise_scheduler.num_of_pre_timestep_frames,
+                    "num_of_timestep_frames": model.deffsion_noise_scheduler.num_of_timestep_frames,
+                    "num_of_post_timestep_frames": model.deffsion_noise_scheduler.num_of_post_timestep_frames,
+                    "noise_schedule": model.deffsion_noise_scheduler.noise_schedule.__name__,
+                    "diffusion_noise_hyperparam_values": model.deffsion_noise_scheduler.noise_hyperparams.tolist(),
+                }
+    )
+
 
     # Add profiling data structures
     profiling = defaultdict(list)
     visalize_step = 50  # How often to print profiling stats
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
-    
-    # Add gradient scaler for mixed precision training
-    scaler = GradScaler()
 
     torch.set_float32_matmul_precision('high')
     
@@ -144,15 +194,11 @@ def train(
             # Model forward time
             forward_start = time.time()
             with autocast(device_type='cuda', dtype=torch.bfloat16):
-                # Convert all inputs to same precision as autocast context
-                main_agent_id_one_hot_casted = main_agent_id_one_hot.to(torch.bfloat16)
-                audio_features_casted = audio_features.to(torch.bfloat16)
-                noisy_gesture_sequence_casted = noisy_gesture_sequence.to(torch.bfloat16)
                 
                 output = model(
-                    one_hot_style = main_agent_id_one_hot_casted,
-                    audio_features = audio_features_casted, 
-                    noisy_gesture_sequence = noisy_gesture_sequence_casted,
+                    one_hot_style = main_agent_id_one_hot,
+                    audio_features = audio_features, 
+                    noisy_gesture_sequence = noisy_gesture_sequence,
                     condition_mask_probabilty = condition_mask_probabilty,
                 )
             forward_time = time.time() - forward_start
@@ -161,14 +207,11 @@ def train(
             # Loss calculation time
             loss_start = time.time()
             with autocast(device_type='cuda', dtype=torch.bfloat16):
-                # Cast the target tensor to the same precision as output
-                gesture_sequence_casted = gesture_sequence.to(torch.bfloat16)
-                
                 # Use the casted target for all loss calculations
-                loss = loss_f(output, gesture_sequence_casted) 
-                loss += variance_loss(output, gesture_sequence_casted) * variance_loss_weight 
-                loss += velocity_loss(output, gesture_sequence_casted) * velocity_loss_weight 
-                loss += acceleration_loss(output, gesture_sequence_casted) * acceleration_loss_weight
+                loss = loss_f(output, gesture_sequence) 
+                loss += variance_loss(output, gesture_sequence) * variance_loss_weight 
+                loss += velocity_loss(output, gesture_sequence) * velocity_loss_weight 
+                loss += acceleration_loss(output, gesture_sequence) * acceleration_loss_weight
             loss_time = time.time() - loss_start
             profiling["loss_calculation"].append(loss_time)
 
@@ -252,15 +295,22 @@ def train(
             # Backward pass time
             backward_start = time.time()
             # Use the scaler to handle the backward pass with mixed precision
-            scaler.scale(loss).backward()
+            
+            print("Checking for float16 tensors before backward...")
+            for name, param in model.named_parameters():
+                if param.dtype == torch.float16:
+                    print(f"Found parameter {name} with dtype {param.dtype}")
+                    # Optionally convert it
+                    param.data = param.data.to(torch.float32)
+            loss.backward()
+
             backward_time = time.time() - backward_start
             profiling["backward"].append(backward_time)
 
             # Optimizer step time
             optimizer_start = time.time()
             # Use the scaler for optimizer step
-            scaler.step(optimizer)
-            scaler.update()
+            optimizer.step()
             optimizer_time = time.time() - optimizer_start
             profiling["optimizer"].append(optimizer_time)
             
