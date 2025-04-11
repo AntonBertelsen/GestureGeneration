@@ -19,6 +19,15 @@ class ContinuousMotionModel(nn.Module):
                 number_of_attention_heads: int = 8, 
                 debugger: Debugger = Debugger(False)):      # Number of pose features per frame. These are the rotations / translations of the bones in the character skeleton. We may not pay attention to every channel for every bone, or every bone. 
         super().__init__()
+
+        self.hyperparameter_dict_to_WnB_tracking = {
+            "n_gesture_length": n_gesture_length,
+            "number_of_styles": number_of_styles,
+            "audio_features_per_frame": audio_features_per_frame,
+            "pose_features_per_frame": pose_features_per_frame,
+            "number_of_attention_heads": number_of_attention_heads,
+        }
+
         self.device = device
         self.debugger = debugger
         self.deffsion_noise_scheduler = deffsion_noise_scheduler
@@ -44,6 +53,7 @@ class ContinuousMotionModel(nn.Module):
             nn.SiLU(),
             nn.Linear(32, 64)
         )
+        self.add_hyperparameters_to_WnB_tracking({"timestep_encoding_mlp_layers": 2, "time_step_mlp_output_dim": 64})
 
         # Style linear layer - for dimensionality expansion from a one-hot encoded (number_of_styles) to (64) shape
         # We move from a one hot encoded format to a 64 dimensional vector. My best guess is that instead of working 
@@ -54,6 +64,7 @@ class ContinuousMotionModel(nn.Module):
             in_features=number_of_styles, 
             out_features=64
         )
+        self.add_hyperparameters_to_WnB_tracking({"style_linear_output_dim": 64})
         
         # Audio feature linear layer per frame - for dimensionality reduction
         # The idea is to reduce the number of audio features per frame to a much smaller number. I know that we use wavlm 
@@ -64,6 +75,7 @@ class ContinuousMotionModel(nn.Module):
             in_features=audio_features_per_frame, 
             out_features=64
         )
+        self.add_hyperparameters_to_WnB_tracking({"audio_linear_output_dim": 64})
 
         # Noisy gesture sequence linear layer - for dimensionality reduction
         # Must be applied to each frame vector in the sequence tensor, individually
@@ -76,6 +88,7 @@ class ContinuousMotionModel(nn.Module):
             in_features=pose_features_per_frame, 
             out_features=256
         )
+        self.add_hyperparameters_to_WnB_tracking({"noisy_gesture_linear_output_dim": 256})
         # Attention layers
 
         # embed_dim=256
@@ -119,6 +132,7 @@ class ContinuousMotionModel(nn.Module):
             in_features=64 + 64 + 256, 
             out_features=256
         )
+        self.add_hyperparameters_to_WnB_tracking({"pre_local_attention_linear_output_dim": 256})
 
         # The original paper uses single headed local attention (above). However, the implementation supports multiheaded attention
         # We experiment with this to see if it can improve performance.
@@ -132,6 +146,13 @@ class ContinuousMotionModel(nn.Module):
             look_backward = 1,
             look_forward = 0
         )
+        self.add_hyperparameters_to_WnB_tracking({
+            "local_attention_window_size": 16, 
+            "local_attention_heads": 8, 
+            "local_attention_dim_head": 32,
+            "local_attention_look_backward": 1,
+            "local_attention_causal": True,
+        })
 
         # We reapply the relative positional embeddings before the transformer encoder
         # This is done in the original implementation, but we do it in a slightly different way.
@@ -143,10 +164,17 @@ class ContinuousMotionModel(nn.Module):
         # It may be worth investigating this further, and see if we can find any reason to do it the way they do it.
 
         self.relative_positional_embedding_funtion = SinusoidalEmbeddings(256)
+        self.add_hyperparameters_to_WnB_tracking({
+            "relative_positional_embedding_funtion_post_local_attention": True,
+        })
+            
         
         encoder_layer = nn.TransformerEncoderLayer(d_model=256, nhead=8, batch_first=True)
         self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=6)
-        
+        self.add_hyperparameters_to_WnB_tracking({
+            "transformer_encoder_layers": 6
+        })
+
         # Final transformation, creating the output
         self.final_linear = nn.Linear(256, pose_features_per_frame)
     
@@ -346,3 +374,9 @@ class ContinuousMotionModel(nn.Module):
 
         # 4 - Return the output of the liniear layer
         return output_tensor
+    
+    def add_hyperparameters_to_WnB_tracking(self, hyperparameter_dict: dict):
+        self.hyperparameter_dict_to_WnB_tracking.update(hyperparameter_dict)
+
+    def get_WnB_config_specs(self):
+        return self.hyperparameter_dict_to_WnB_tracking

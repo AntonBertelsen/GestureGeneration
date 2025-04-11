@@ -18,21 +18,29 @@ from einops import rearrange
 import math
 from typing import Callable
 
-class Diffusion:
+from WnB_trackable import WnBTrackable
+
+class Diffusion(WnBTrackable):
 
 
     def __init__(self, 
                  num_of_pre_timestep_frames: int, 
                  num_of_timestep_frames: int, 
                  num_of_post_timestep_frames: int,
-                 noise_schedule: Callable[[int, int], float],
+                 noise_schedule: tuple[Callable[[int, int], float], dict[str, Union[str, int, float, bool]]],
                  device: str):
         
+        self.device = device
         self.num_of_pre_timestep_frames = num_of_pre_timestep_frames
         self.num_of_timestep_frames = num_of_timestep_frames
         self.num_of_post_timestep_frames = num_of_post_timestep_frames
-        self.noise_schedule = noise_schedule
-        self.device = device
+
+        # This is the noise schedule function that will be used to add noise at diffrent levels, given a timestamp, and a max number of timestpes.
+        self.noise_schedule: Callable[[int, int], float] = noise_schedule[0]
+
+        # This is a dictionary with the hyperparameters used for W&B tracking
+        self.noise_schedule_hyper_params: dict[str, Union[str, int, float, bool]] = noise_schedule[1] 
+
 
         # In order to train faster we want to be able to jump to any level of noise at any time.
         # To do this, we precalculate the amount of noise that would have been added at any timestep. This means adding up noise
@@ -139,7 +147,7 @@ class Diffusion:
         def linear_schedule(t: int, T: int) -> float:
             return beta_min + (beta_max - beta_min) * (t / T)
         
-        return linear_schedule
+        return (linear_schedule, {"name": "linear_schedule", "beta_min": beta_min, "beta_max": beta_max})
     
     @staticmethod
     def quadratic_schedule(beta_min = 0.0001, beta_max = 0.02) -> Callable[[int, int], float]:
@@ -151,7 +159,7 @@ class Diffusion:
             return beta_min + (beta_max - beta_min) * (t / T) ** 2
             # return (t / T) ** 2
 
-        return quadratic_schedule
+        return (quadratic_schedule, {"name": "quadratic_schedule", "beta_min": beta_min, "beta_max": beta_max})
     
     @staticmethod
     def cosine_schedule(s = 0.008) -> Callable[[int, int], float]:
@@ -164,7 +172,7 @@ class Diffusion:
         def cosine_schedule(t: int, T: int):
             return math.cos((t / T + s) / (1 + s) * (math.pi / 2)) ** 2
 
-        return cosine_schedule
+        return (cosine_schedule, {"name": "cosine_schedule", "s": s})
     
     @staticmethod
     def exponential_schedule(beta_min = 0.0001, beta_max = 0.02) -> Callable[[int, int], float]:
@@ -174,7 +182,7 @@ class Diffusion:
         def exponential_schedule(t: int, T: int) -> float:
             return beta_min * ((beta_max / beta_min) ** (t / T))
 
-        return exponential_schedule
+        return (exponential_schedule, {"name": "exponential_schedule", "beta_min": beta_min, "beta_max": beta_max})
     
     @staticmethod
     def sigmoid_schedule(k = 10, beta_min = 0.0001, beta_max = 0.02) -> Callable[[int, int], float]:
@@ -186,4 +194,15 @@ class Diffusion:
             return beta_min + (beta_max - beta_min) / (1 + math.exp(-k * (t / T - 0.5)))
             # return 1 / (1 + math.exp(-k * (t / T - 0.5)))
 
-        return sigmoid_schedule
+        return (sigmoid_schedule, {"name": "sigmoid_schedule", "k": k, "beta_min": beta_min, "beta_max": beta_max})
+
+    # Implenents the abstract method from the WnBTrackable ABC class (interface)
+    def get_WnB_config_specs(self):
+        # Return the configuration specs needed for Weights & Biases tracking.
+        # This should be a dictionary with keys as the parameter names and values as their types.
+        return {
+            "num_of_pre_timestep_frames": self.num_of_pre_timestep_frames,
+            "num_of_timestep_frames": self.num_of_timestep_frames,
+            "num_of_post_timestep_frames": self.num_of_post_timestep_frames,
+            **self.noise_schedule_hyper_params,
+        }
