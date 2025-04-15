@@ -158,8 +158,10 @@ def train(
 
             # Diffusion time
             diffusion_start = time.time()
+            time_step_stakking_level = torch.randint(0, diffusion.num_of_timestap_stackings, (1,))
             noisy_gesture_sequence = diffusion.forward(
-                seqence_tensor=gesture_sequence
+                seqence_tensor=gesture_sequence,
+                stacking_step=time_step_stakking_level,
             )
             diffusion_time = time.time() - diffusion_start
             profiling["diffusion_forward"].append(diffusion_time)
@@ -172,6 +174,7 @@ def train(
             with autocast(device_type=device.type, dtype=torch.bfloat16):
                 
                 output = model(
+                    current_time_step_stacking_level = time_step_stakking_level,
                     one_hot_style = main_agent_id_one_hot,
                     audio_features = audio_features, 
                     noisy_gesture_sequence = noisy_gesture_sequence,

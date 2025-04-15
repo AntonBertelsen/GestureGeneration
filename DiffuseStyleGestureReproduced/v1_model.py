@@ -32,10 +32,14 @@ class ContinuousMotionModel(nn.Module):
         self.debugger = debugger
         self.deffsion_noise_scheduler = deffsion_noise_scheduler
 
-        self.n_gesture_length = n_gesture_length
+        # Parameter from the diffusion model:
+        self.max_timestep_stakking_level = deffsion_noise_scheduler.num_of_timestap_stackings
+
         self.num_of_pre_timestep_frames = deffsion_noise_scheduler.num_of_pre_timestep_frames
         self.num_of_timestep_frames = deffsion_noise_scheduler.num_of_timestep_frames
         self.num_of_post_timestep_frames = deffsion_noise_scheduler.num_of_post_timestep_frames
+
+        self.n_gesture_length = n_gesture_length
 
         assert(self.num_of_pre_timestep_frames + self.num_of_timestep_frames + self.num_of_post_timestep_frames == self.n_gesture_length)
         
@@ -43,6 +47,12 @@ class ContinuousMotionModel(nn.Module):
 
         # Implemetation of the DiffuseStyleGestureModel based on the paper by YoungSeng et al.
         # We instantiate all learned model layers needed below.
+
+        # Timestep: 
+        self.base_timesteps_at_time_step_stacking_levels = []
+        for time_step_stacking_level in range(self.max_timestep_stakking_level):
+            timesteps = [(t + 1) * self.max_timestep_stakking_level - (time_step_stacking_level % self.max_timestep_stakking_level) for t in range(self.num_of_timestep_frames)]
+            self.base_timesteps_at_time_step_stacking_levels.append(timesteps)
 
         # The time step encoding MLP. Our best guess is that this is actually a learned position encoding as described in Vaswani et al. 
         # Maybe it could be interesting to investigate using sinosoidal positional encoding? That would be one way to reduce the number 
@@ -184,6 +194,7 @@ class ContinuousMotionModel(nn.Module):
 
 
     def forward(self, 
+                current_time_step_stacking_level: int,
                 one_hot_style, 
                 audio_features, 
                 noisy_gesture_sequence,
@@ -219,11 +230,11 @@ class ContinuousMotionModel(nn.Module):
         # 1.1.2 - first make the position embedding for timestep 0 and max_number_of_time_steps + 1
 
         timestep_0_pos_embedding = self.time_step_mlp(torch.tensor([0.0]))  # (bs, 1, 1) -> (bs, 1, 64)
-        timestep_max_pos_embedding = self.time_step_mlp(torch.tensor([float(self.num_of_timestep_frames)]))  # (bs, 1, 1) -> (bs, 1, 64)
+        timestep_max_pos_embedding = self.time_step_mlp(torch.tensor([float(self.num_of_timestep_frames * self.max_timestep_stakking_level)]))  # (bs, 1, 1) -> (bs, 1, 64)
 
         # We rescale them to be between 0 and 1 to make it easier for the MLP positional embedding to learn
-        timestep_0_pos_embedding /= self.num_of_timestep_frames
-        timestep_max_pos_embedding /= self.num_of_timestep_frames
+        timestep_0_pos_embedding /= (self.num_of_timestep_frames * self.max_timestep_stakking_level)
+        timestep_max_pos_embedding /= (self.num_of_timestep_frames * self.max_timestep_stakking_level)
 
         self.debugger.capture(("timestep_0_pos_embedding", timestep_0_pos_embedding), [Show.MAX_MIN, Show.IMAGE], 
             keys=["timestep_0_pos_embedding", "timesteps_pos_embedding"])
@@ -232,14 +243,15 @@ class ContinuousMotionModel(nn.Module):
 
         # 1.1.3 - Then we make the positional embedding each of the timestep frames in the sequence
 
-        t_for_each_timestep_frame = torch.arange(self.num_of_timestep_frames).unsqueeze(-1).float()  # (bs, t_for_each_timestep_frame, 1)
-        # TODO: tjeck if this works with bs dim
+        t_for_each_timestep_frame = torch.tensor(
+            self.base_timesteps_at_time_step_stacking_levels[current_time_step_stacking_level]
+        ).unsqueeze(-1).float()  # (bs, t_for_each_timestep_frame, 1)
 
         self.debugger.capture(("t_for_each_timestep_frame", t_for_each_timestep_frame), [Show.MAX_MIN, Show.IMAGE],
             keys=["t_for_each_timestep_frame", "timesteps_pos_embedding"])
 
         # We need to rescale the t_for_each_timestep_frame to be between 0 and 1
-        t_for_each_timestep_frame /= self.num_of_timestep_frames
+        t_for_each_timestep_frame /= (self.num_of_timestep_frames * self.max_timestep_stakking_level)
 
         t_with_pos_embedding_for_each_timestep_frame = self.time_step_mlp(t_for_each_timestep_frame)  # (bs, t_for_each_timestep_frame, 192)
 
@@ -375,8 +387,12 @@ class ContinuousMotionModel(nn.Module):
         # 4 - Return the output of the liniear layer
         return output_tensor
     
+
+
+    # Functions for Weights & Biases tracking
     def add_hyperparameters_to_WnB_tracking(self, hyperparameter_dict: dict):
         self.hyperparameter_dict_to_WnB_tracking.update(hyperparameter_dict)
+
 
     def get_WnB_config_specs(self):
         return self.hyperparameter_dict_to_WnB_tracking
