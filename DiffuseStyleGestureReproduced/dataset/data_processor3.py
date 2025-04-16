@@ -3,7 +3,7 @@ import os
 import csv
 import pickle
 from tqdm import tqdm
-from utils.bvh_processing.bvh_converter3 import OffsetBVHParser
+from utils.bvh_processing.bvh_converter4 import OffsetBVHParser
 from utils.audio_processing.extract_audio_features import extract_audio_features
 
 class DataProcessor:
@@ -15,9 +15,9 @@ class DataProcessor:
         self.features_dir = os.path.join(output_dir, "features")
         
         # Ensure the directory exists and is writable
-try:
-        os.makedirs(self.features_dir, exist_ok=True)
-except PermissionError as e:
+        try:
+            os.makedirs(self.features_dir, exist_ok=True)
+        except PermissionError as e:
             raise PermissionError(f"Unable to create directory '{self.features_dir}'. Check permissions.") from e
         
         # Load metadata and files

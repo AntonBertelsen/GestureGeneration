@@ -257,12 +257,9 @@ class OffsetBVHParser:
         with open(output_file, 'w') as f:
             f.write(self.hierarchy_text + "\n" + motion_text)
     
-    def _euler_to_6d_batch(self, euler_batch: np.ndarray) -> np.ndarray:
-        # Rearrange for scipy: from [x,y,z] to [z,x,y]
-        zxy_batch = euler_batch[:, [2, 0, 1]]
-        
+    def _euler_to_6d_batch(self, euler_batch: np.ndarray) -> np.ndarray:        
         # Create rotation objects (handles all frames at once)
-        rot = R.from_euler('zxy', zxy_batch, degrees=True)
+        rot = R.from_euler('ZXY', euler_batch, degrees=True)
         
         # Get rotation matrices
         matrices = rot.as_matrix()  # Shape: (num_frames, 3, 3)
@@ -300,22 +297,22 @@ class OffsetBVHParser:
         rot = R.from_matrix(matrices)
         
         # Convert to Euler angles in ZXY order
-        euler_zxy = rot.as_euler('zxy', degrees=True)
+        euler = rot.as_euler('ZXY', degrees=True)
 
         # detect large differences in z rotation for each bone
-        for i in range(1, euler_zxy.shape[0]):
-            # for _ in range(2): # Try twice. This is because we may have a jump of 360 degrees
-            for j in range(euler_zxy.shape[1]):
-                difference = euler_zxy[i, j] - euler_zxy[i-1, j]
-                if abs(difference) > 160:
-                    print(j, "difference at frame", i, ":", difference)
-                    # print x y z for the 10 surrounding frames
-                    for k in range(-5, 6):
-                        print(euler_zxy[i+k, :])
-                    rounded_diff = np.round(difference / 180) * 180
-                    euler_zxy[i:, j] -= np.sign(difference) * rounded_diff
+        # for i in range(1, euler.shape[0]):
+        #     # for _ in range(2): # Try twice. This is because we may have a jump of 360 degrees
+        #     for j in range(euler.shape[1]):
+        #         difference = euler[i, j] - euler[i-1, j]
+        #         if abs(difference) > 160:
+        #             print(j, "difference at frame", i, ":", difference)
+        #             # print x y z for the 10 surrounding frames
+        #             for k in range(-5, 6):
+        #                 print(euler[i+k, :])
+        #             rounded_diff = np.round(difference / 180) * 180
+        #             euler[i:, j] -= np.sign(difference) * rounded_diff
         # Rearrange from [z,x,y] back to [x,y,z]
-        return euler_zxy[:, [1, 2, 0]]
+        return euler
     
     def get_all_joints(self) -> List[str]:
         return self.joints
