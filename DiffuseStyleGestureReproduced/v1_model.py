@@ -228,9 +228,13 @@ class ContinuousMotionModel(nn.Module):
         #       Producing a tensor of shape (bs, number_of_frames, 192)
 
         # 1.1.2 - first make the position embedding for timestep 0 and max_number_of_time_steps + 1
-
-        timestep_0_pos_embedding = self.time_step_mlp(torch.tensor([0.0]))  # (bs, 1, 1) -> (bs, 1, 64)
-        timestep_max_pos_embedding = self.time_step_mlp(torch.tensor([float(self.num_of_timestep_frames * self.max_timestep_stakking_level)]))  # (bs, 1, 1) -> (bs, 1, 64)
+        
+        # We create tensors for the timestep linear layers
+        timestep_0 = torch.tensor([0.0]).to(self.device)  # (bs, 1, 1)
+        timestep = torch.tensor([float(self.num_of_timestep_frames)]).to(self.device)  # (bs, 1, 1)
+        
+        timestep_0_pos_embedding = self.time_step_mlp(timestep_0)  # (bs, 1, 1) -> (bs, 1, 64)
+        timestep_max_pos_embedding = self.time_step_mlp(timestep)  # (bs, 1, 1) -> (bs, 1, 64)
 
         # We rescale them to be between 0 and 1 to make it easier for the MLP positional embedding to learn
         timestep_0_pos_embedding /= (self.num_of_timestep_frames * self.max_timestep_stakking_level)
@@ -243,9 +247,8 @@ class ContinuousMotionModel(nn.Module):
 
         # 1.1.3 - Then we make the positional embedding each of the timestep frames in the sequence
 
-        t_for_each_timestep_frame = torch.tensor(
-            self.base_timesteps_at_time_step_stacking_levels[current_time_step_stacking_level]
-        ).unsqueeze(-1).float()  # (bs, t_for_each_timestep_frame, 1)
+        t_for_each_timestep_frame = torch.arange(float(self.num_of_timestep_frames)).unsqueeze(-1).to(self.device)  # (bs, t_for_each_timestep_frame, 1)
+        # TODO: tjeck if this works with bs dim
 
         self.debugger.capture(("t_for_each_timestep_frame", t_for_each_timestep_frame), [Show.MAX_MIN, Show.IMAGE],
             keys=["t_for_each_timestep_frame", "timesteps_pos_embedding"])
@@ -358,8 +361,6 @@ class ContinuousMotionModel(nn.Module):
         local_attention_output = self.multi_head_local_attention(input)
 
         self.debugger.capture(("local_attention_output", local_attention_output), [Show.MAX_MIN, Show.IMAGE], keys="local_attention_output")
-
-
         # 3.3 - Apply a self attention layer to the tensor of shape (256, N+1)
         #       We now apply full self attention. The paper and illustration makes it look as though we are applying a single
         #       self attention layer, but the code seems to actually apply a full 8 layer encoder transformer model.
@@ -371,19 +372,13 @@ class ContinuousMotionModel(nn.Module):
 
         relative_positional_embedding, scale = self.relative_positional_embedding_funtion(local_attention_output)
         local_attention_output, _ = apply_rotary_pos_emb(local_attention_output, local_attention_output, relative_positional_embedding, scale)
-
         self.debugger.capture(("combined_tensor with RPE", local_attention_output), [Show.MAX_MIN, Show.IMAGE], keys="combined_tensor")
-
         transformer_encoder_output = self.transformer_encoder(local_attention_output)
-
         self.debugger.capture(("transformer_encoder_output", transformer_encoder_output), [Show.MAX_MIN, Show.IMAGE], keys="transformer_encoder_output")
-
         # 3.4 - Pass the output of the self attention layer to a linear layer,
         #       to get a tensor of shape (1141, N)
         output_tensor = self.final_linear(transformer_encoder_output)
-
         self.debugger.capture(("output_tensor", output_tensor), [Show.MAX_MIN, Show.IMAGE], keys="output_tensor")
-
         # 4 - Return the output of the liniear layer
         return output_tensor
     

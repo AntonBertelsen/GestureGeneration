@@ -3,6 +3,11 @@ import torch.optim as optim
 import torch.nn as nn
 import numpy as np
 import matplotlib.pyplot as plt
+from typing import Union
+from io import BytesIO
+from PIL import Image
+from moviepy import ImageSequenceClip
+from datetime import datetime
 from torch.amp import autocast
 
 from tqdm import tqdm
@@ -102,7 +107,7 @@ def train(
 
     # I then move the model to the device that is being used and put in traning mode
     model = model.to(device)
-    model = torch.compile(model, backend="cudagraphs")
+    # model = torch.compile(model, backend="cudagraphs")
     print("Model compling to cudagraphs runtime")
     model.train()
     
@@ -166,15 +171,14 @@ def train(
             diffusion_time = time.time() - diffusion_start
             profiling["diffusion_forward"].append(diffusion_time)
 
-            # Zero gradients before forward pass (best practice)
+            # Zero gradients before forward pass
             optimizer.zero_grad()
 
             # Model forward time
             forward_start = time.time()
-            with autocast(device_type=device.type, dtype=torch.bfloat16):
-                
+            with autocast(device_type=device, dtype=torch.bfloat16):
+                # Convert all inputs to same precision as autocast context
                 output = model(
-                    current_time_step_stacking_level = time_step_stakking_level,
                     one_hot_style = main_agent_id_one_hot,
                     audio_features = audio_features, 
                     noisy_gesture_sequence = noisy_gesture_sequence,
@@ -185,13 +189,12 @@ def train(
 
             # Loss calculation time
             loss_start = time.time()
-            with autocast(device_type=device.type, dtype=torch.bfloat16):
+            with autocast(device_type=device, dtype=torch.bfloat16):
                 # Use the casted target for all loss calculations
                 loss = loss_f(output, gesture_sequence) 
                 loss += variance_loss(output, gesture_sequence) * variance_loss_weight 
                 loss += velocity_loss(output, gesture_sequence) * velocity_loss_weight 
                 loss += acceleration_loss(output, gesture_sequence) * acceleration_loss_weight
-
             loss_time = time.time() - loss_start
             profiling["loss_calculation"].append(loss_time)
 
@@ -279,16 +282,7 @@ def train(
 
             # Backward pass time
             backward_start = time.time()
-            # Use the scaler to handle the backward pass with mixed precision
-            
-            print("Checking for float16 tensors before backward...")
-            for name, param in model.named_parameters():
-                if param.dtype == torch.float16:
-                    print(f"Found parameter {name} with dtype {param.dtype}")
-                    # Optionally convert it
-                    param.data = param.data.to(torch.float32)
             loss.backward()
-
             backward_time = time.time() - backward_start
             profiling["backward"].append(backward_time)
 

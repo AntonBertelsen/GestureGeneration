@@ -258,11 +258,9 @@ class OffsetBVHParser:
             f.write(self.hierarchy_text + "\n" + motion_text)
     
     def _euler_to_6d_batch(self, euler_batch: np.ndarray) -> np.ndarray:
-        # Rearrange for scipy: from [x,y,z] to [z,x,y]
-        zxy_batch = euler_batch[:, [2, 0, 1]]
         
         # Create rotation objects (handles all frames at once)
-        rot = R.from_euler('zxy', zxy_batch, degrees=True)
+        rot = R.from_euler('zxy', euler_batch, degrees=True)
         
         # Get rotation matrices
         matrices = rot.as_matrix()  # Shape: (num_frames, 3, 3)
@@ -302,20 +300,8 @@ class OffsetBVHParser:
         # Convert to Euler angles in ZXY order
         euler_zxy = rot.as_euler('zxy', degrees=True)
 
-        # detect large differences in z rotation for each bone
-        for i in range(1, euler_zxy.shape[0]):
-            # for _ in range(2): # Try twice. This is because we may have a jump of 360 degrees
-            for j in range(euler_zxy.shape[1]):
-                difference = euler_zxy[i, j] - euler_zxy[i-1, j]
-                if abs(difference) > 160:
-                    print(j, "difference at frame", i, ":", difference)
-                    # print x y z for the 10 surrounding frames
-                    for k in range(-5, 6):
-                        print(euler_zxy[i+k, :])
-                    rounded_diff = np.round(difference / 180) * 180
-                    euler_zxy[i:, j] -= np.sign(difference) * rounded_diff
         # Rearrange from [z,x,y] back to [x,y,z]
-        return euler_zxy[:, [1, 2, 0]]
+        return euler_zxy
     
     def get_all_joints(self) -> List[str]:
         return self.joints
@@ -428,3 +414,82 @@ class OffsetBVHParser:
             return parent_matrix @ joint_matrix
         else:
             return parent_matrix
+        
+    def features_to_websocket_format(self, features, frame_idx=None):
+        """
+        Convert BVH features to WebSocket-friendly format with quaternion rotations and bone names
+        
+        Args:
+            features: BVH features array from extract_channels() 
+            frame_idx: Optional index to extract a single frame (None = all frames)
+            
+        Returns:
+            If frame_idx is None: List of frames with positions and quaternion rotations
+            If frame_idx is given: Single frame data dict
+        """
+        # Handle single frame or batch
+        if frame_idx is not None:
+            frames_to_process = [features[frame_idx:frame_idx+1]]
+            single_frame = True
+        else:
+            frames_to_process = features
+            single_frame = False
+        
+        result_frames = []
+        
+        # Get bone names for each rotation map entry
+        bone_names = []
+        if self.target_joints and 'body_world' in self.target_joints:
+            bone_names.append('body_world')  # Root
+        
+        # Get list of rotation bones in order
+        rot_bones = []
+        for joint_name in self.joints:
+            if joint_name == 'body_world':
+                continue  # Already handled
+            if self.target_joints is not None and joint_name not in self.target_joints:
+                continue
+            if len(self.joint_rotation_indices.get(joint_name, [])) == 3:
+                rot_bones.append(joint_name)
+        
+        # Process each frame
+        for frame_features in frames_to_process:
+            # Use a dictionary with bone names as keys instead of an array
+            frame_data = {"joints": {}}
+            
+            # Process root position (first 3 values if present)
+            if len(self._pos_extraction_map) > 0:
+                frame_data["joints"]["body_world"] = {
+                    "position": {
+                        "x": float(frame_features[0]),
+                        "y": float(frame_features[1]),
+                        "z": float(frame_features[2])
+                    },
+                    # Default identity quaternion for root if not rotated
+                    "eulerAngles": {"x": 0.0, "y": 0.0, "z": 0.0}
+                }
+            
+            # Process each joint's rotation
+            for i, (out_start_idx, _) in enumerate(self._rot_extraction_map):
+                # Get bone name for this rotation
+                bone_name = rot_bones[i] if i < len(rot_bones) else f"bone_{i}"
+                    
+                # Get the 6D rotation representation
+                rot_6d = frame_features[out_start_idx:out_start_idx+6].reshape(1, 6)
+                
+                # Convert 6D representation to Euler angles using existing function
+                euler_angles = self._6d_to_euler_batch(rot_6d)[0]  # Get first (only) result
+                
+                # Add both quaternion and Euler angles to the frame data
+                frame_data["joints"][bone_name] = {
+                    "eulerAngles": {
+                        "x": float(euler_angles[1]),  # X is second in ZXY order
+                        "y": float(euler_angles[2]),  # Y is third
+                        "z": float(euler_angles[0])   # Z is first
+                    }
+                }
+            
+            result_frames.append(frame_data)
+        
+        # Return single frame or array of frames
+        return result_frames[0] if single_frame else result_frames
