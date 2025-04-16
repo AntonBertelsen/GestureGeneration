@@ -343,7 +343,7 @@ def train(
     
     # When all of the epochs are over, the entire list of training loss and validation loss are returned.
     run.finish() # close the wandb (W&B) run
-    return loss_rec['train'] #, loss_rec['val']
+    return model # loss_rec['train'] #, loss_rec['val']
 
 
 def RunTypes(Enum):
