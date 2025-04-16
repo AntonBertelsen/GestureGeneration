@@ -1,32 +1,21 @@
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
 import torch.optim as optim
+import torch.nn as nn
 import numpy as np
-from local_attention import transformer
-from local_attention.rotary import SinusoidalEmbeddings, apply_rotary_pos_emb
 import matplotlib.pyplot as plt
-from typing import Union
-from io import BytesIO
-from PIL import Image
-from moviepy import ImageSequenceClip
-from datetime import datetime
-from torch.amp import GradScaler, autocast
+from torch.amp import autocast
 
 from tqdm import tqdm
 from IPython.display import clear_output
 import time
 from collections import defaultdict
 
+import wandb
 
 
-from v1_sliding_diffusion import Diffusion
-
-# This is mostly created by combining elements from Solved_MLP_mnist_tensorflow-pytorch.ipynb 
-# and SOLUTION_Convolutional_networks.ipynb from the applied AI course.
 
 # First the loss function is defined, as Huber Loss.
-# This is the same loss function that was used in the original paper. 
+# This is the same loss function that was used in the original paper.
 loss_f = nn.HuberLoss()
 
 def variance_loss(denoised_gesture, true_gesture):
@@ -47,28 +36,65 @@ def acceleration_loss(pred, gt):
     return torch.mean((acc_pred - acc_gt) ** 2)
 
 def train(
+        experiment_collection_name: str, # name of the gruope of experiments, this run is a part of
+        debug_run: bool, # shold log to wandb or not 
         model,
-        diffusion: Diffusion,
         device,
         training_loader,
         val_loader, 
         num_epochs: int, 
-        condition_mask_probabilty=0.1, 
+        condition_mask_probabilty=0.1,  # TODO: should be in model, as hyper param, not here
         lr=0.0003,
         variance_loss_weight=0.1,
         velocity_loss_weight=0.1,
         acceleration_loss_weight=0.1):
+
+
+    diffusion = model.deffsion_noise_scheduler
+
 
     # Add profiling data structures
     profiling = defaultdict(list)
     visalize_step = 50  # How often to print profiling stats
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
-    
-    # Add gradient scaler for mixed precision training
-    scaler = GradScaler()
 
     torch.set_float32_matmul_precision('high')
+    
+
+    
+    # initialise a wandb (weighs and biases) run tracker
+    run = None
+    step = 0
+    if not debug_run:
+        run = wandb.init(
+            project="v1_sliding_diffusion", 
+            group=experiment_collection_name,
+            name=f"{experiment_collection_name}_{time.strftime('%Y-%m-%d_%H-%M-%S')}",
+            entity="", # W&B username or team, when its empty, it will use the default team
+            config={
+                # Training hyper parameters
+                "epochs": num_epochs,
+                "batch_size": training_loader.batch_size,
+                "learning_rate": lr,
+                "optimizer": optimizer.__class__.__name__,
+                "variance_loss_weight": variance_loss_weight,
+                "velocity_loss_weight": velocity_loss_weight,
+                "acceleration_loss_weight": acceleration_loss_weight,
+
+                # Data hyper params:
+                # TODO: add hyper parameters for the dataset, using the get_WnB_config_specs(), implementing the WnBTrackable ABC class
+                "dataloader": "RAMResidentDataset",
+                "float_precision_or_type": "Halvs",
+
+                # Noising hyper parameters
+                **diffusion.get_WnB_config_specs(),
+
+                # Model hyper parameters
+                **model.get_WnB_config_specs(),
+            }
+        )
+
     
     # The current lowest validation loss gets defined as an infinitely large number in order to make sure that 
     # it gets reduced in the first epoch. .
@@ -132,8 +158,10 @@ def train(
 
             # Diffusion time
             diffusion_start = time.time()
+            time_step_stakking_level = torch.randint(0, diffusion.num_of_timestap_stackings, (1,))
             noisy_gesture_sequence = diffusion.forward(
-                seqence_tensor=gesture_sequence
+                seqence_tensor=gesture_sequence,
+                stacking_step=time_step_stakking_level,
             )
             diffusion_time = time.time() - diffusion_start
             profiling["diffusion_forward"].append(diffusion_time)
@@ -143,16 +171,13 @@ def train(
 
             # Model forward time
             forward_start = time.time()
-            with autocast(device_type='cuda', dtype=torch.bfloat16):
-                # Convert all inputs to same precision as autocast context
-                main_agent_id_one_hot_casted = main_agent_id_one_hot.to(torch.bfloat16)
-                audio_features_casted = audio_features.to(torch.bfloat16)
-                noisy_gesture_sequence_casted = noisy_gesture_sequence.to(torch.bfloat16)
+            with autocast(device_type=device.type, dtype=torch.bfloat16):
                 
                 output = model(
-                    one_hot_style = main_agent_id_one_hot_casted,
-                    audio_features = audio_features_casted, 
-                    noisy_gesture_sequence = noisy_gesture_sequence_casted,
+                    current_time_step_stacking_level = time_step_stakking_level,
+                    one_hot_style = main_agent_id_one_hot,
+                    audio_features = audio_features, 
+                    noisy_gesture_sequence = noisy_gesture_sequence,
                     condition_mask_probabilty = condition_mask_probabilty,
                 )
             forward_time = time.time() - forward_start
@@ -160,15 +185,13 @@ def train(
 
             # Loss calculation time
             loss_start = time.time()
-            with autocast(device_type='cuda', dtype=torch.bfloat16):
-                # Cast the target tensor to the same precision as output
-                gesture_sequence_casted = gesture_sequence.to(torch.bfloat16)
-                
+            with autocast(device_type=device.type, dtype=torch.bfloat16):
                 # Use the casted target for all loss calculations
-                loss = loss_f(output, gesture_sequence_casted) 
-                loss += variance_loss(output, gesture_sequence_casted) * variance_loss_weight 
-                loss += velocity_loss(output, gesture_sequence_casted) * velocity_loss_weight 
-                loss += acceleration_loss(output, gesture_sequence_casted) * acceleration_loss_weight
+                loss = loss_f(output, gesture_sequence) 
+                loss += variance_loss(output, gesture_sequence) * variance_loss_weight 
+                loss += velocity_loss(output, gesture_sequence) * velocity_loss_weight 
+                loss += acceleration_loss(output, gesture_sequence) * acceleration_loss_weight
+
             loss_time = time.time() - loss_start
             profiling["loss_calculation"].append(loss_time)
 
@@ -177,6 +200,10 @@ def train(
             loss_rec['train'].append(loss.item())
 
             if i % visalize_step == 0:
+                
+                # log the loss to wandb (W&B)
+                step = i + epoch * len(training_loader)
+                if not debug_run: run.log({"train/loss": loss.item()}, step=step)
                 
                 clear_output(wait=True)
                 visualisation_start = time.time()
@@ -244,6 +271,7 @@ def train(
                 axs[4].text(0.02, 0.98, profiling_text, transform=axs[4].transAxes, 
                             verticalalignment='top', bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
                 
+                run.log({"train/predoction_illutration": wandb.Image(plt.gcf())}, step=step) # Log the figure to W&B
                 plt.show()
 
                 visualisation_time = time.time() - visualisation_start
@@ -252,15 +280,22 @@ def train(
             # Backward pass time
             backward_start = time.time()
             # Use the scaler to handle the backward pass with mixed precision
-            scaler.scale(loss).backward()
+            
+            print("Checking for float16 tensors before backward...")
+            for name, param in model.named_parameters():
+                if param.dtype == torch.float16:
+                    print(f"Found parameter {name} with dtype {param.dtype}")
+                    # Optionally convert it
+                    param.data = param.data.to(torch.float32)
+            loss.backward()
+
             backward_time = time.time() - backward_start
             profiling["backward"].append(backward_time)
 
             # Optimizer step time
             optimizer_start = time.time()
             # Use the scaler for optimizer step
-            scaler.step(optimizer)
-            scaler.update()
+            optimizer.step()
             optimizer_time = time.time() - optimizer_start
             profiling["optimizer"].append(optimizer_time)
             
@@ -307,5 +342,13 @@ def train(
         # clear_output(wait=True)
     
     # When all of the epochs are over, the entire list of training loss and validation loss are returned.
+    run.finish() # close the wandb (W&B) run
     return loss_rec['train'] #, loss_rec['val']
 
+
+def RunTypes(Enum):
+    EXPERIMENT = "EXPERIMENT"
+    DEBUG = "DEBUG"
+
+def init_wandb_experiemnt_tracker(project_name, run_type, run_name, model):
+    pass

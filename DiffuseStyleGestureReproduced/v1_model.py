@@ -19,14 +19,27 @@ class ContinuousMotionModel(nn.Module):
                 number_of_attention_heads: int = 8, 
                 debugger: Debugger = Debugger(False)):      # Number of pose features per frame. These are the rotations / translations of the bones in the character skeleton. We may not pay attention to every channel for every bone, or every bone. 
         super().__init__()
+
+        self.hyperparameter_dict_to_WnB_tracking = {
+            "n_gesture_length": n_gesture_length,
+            "number_of_styles": number_of_styles,
+            "audio_features_per_frame": audio_features_per_frame,
+            "pose_features_per_frame": pose_features_per_frame,
+            "number_of_attention_heads": number_of_attention_heads,
+        }
+
         self.device = device
         self.debugger = debugger
         self.deffsion_noise_scheduler = deffsion_noise_scheduler
 
-        self.n_gesture_length = n_gesture_length
+        # Parameter from the diffusion model:
+        self.max_timestep_stakking_level = deffsion_noise_scheduler.num_of_timestap_stackings
+
         self.num_of_pre_timestep_frames = deffsion_noise_scheduler.num_of_pre_timestep_frames
         self.num_of_timestep_frames = deffsion_noise_scheduler.num_of_timestep_frames
         self.num_of_post_timestep_frames = deffsion_noise_scheduler.num_of_post_timestep_frames
+
+        self.n_gesture_length = n_gesture_length
 
         assert(self.num_of_pre_timestep_frames + self.num_of_timestep_frames + self.num_of_post_timestep_frames == self.n_gesture_length)
         
@@ -34,6 +47,12 @@ class ContinuousMotionModel(nn.Module):
 
         # Implemetation of the DiffuseStyleGestureModel based on the paper by YoungSeng et al.
         # We instantiate all learned model layers needed below.
+
+        # Timestep: 
+        self.base_timesteps_at_time_step_stacking_levels = []
+        for time_step_stacking_level in range(self.max_timestep_stakking_level):
+            timesteps = [(t + 1) * self.max_timestep_stakking_level - (time_step_stacking_level % self.max_timestep_stakking_level) for t in range(self.num_of_timestep_frames)]
+            self.base_timesteps_at_time_step_stacking_levels.append(timesteps)
 
         # The time step encoding MLP. Our best guess is that this is actually a learned position encoding as described in Vaswani et al. 
         # Maybe it could be interesting to investigate using sinosoidal positional encoding? That would be one way to reduce the number 
@@ -44,6 +63,7 @@ class ContinuousMotionModel(nn.Module):
             nn.SiLU(),
             nn.Linear(32, 64)
         )
+        self.add_hyperparameters_to_WnB_tracking({"timestep_encoding_mlp_layers": 2, "time_step_mlp_output_dim": 64})
 
         # Style linear layer - for dimensionality expansion from a one-hot encoded (number_of_styles) to (64) shape
         # We move from a one hot encoded format to a 64 dimensional vector. My best guess is that instead of working 
@@ -54,6 +74,7 @@ class ContinuousMotionModel(nn.Module):
             in_features=number_of_styles, 
             out_features=64
         )
+        self.add_hyperparameters_to_WnB_tracking({"style_linear_output_dim": 64})
         
         # Audio feature linear layer per frame - for dimensionality reduction
         # The idea is to reduce the number of audio features per frame to a much smaller number. I know that we use wavlm 
@@ -64,6 +85,7 @@ class ContinuousMotionModel(nn.Module):
             in_features=audio_features_per_frame, 
             out_features=64
         )
+        self.add_hyperparameters_to_WnB_tracking({"audio_linear_output_dim": 64})
 
         # Noisy gesture sequence linear layer - for dimensionality reduction
         # Must be applied to each frame vector in the sequence tensor, individually
@@ -76,6 +98,7 @@ class ContinuousMotionModel(nn.Module):
             in_features=pose_features_per_frame, 
             out_features=256
         )
+        self.add_hyperparameters_to_WnB_tracking({"noisy_gesture_linear_output_dim": 256})
         # Attention layers
 
         # embed_dim=256
@@ -119,6 +142,7 @@ class ContinuousMotionModel(nn.Module):
             in_features=64 + 64 + 256, 
             out_features=256
         )
+        self.add_hyperparameters_to_WnB_tracking({"pre_local_attention_linear_output_dim": 256})
 
         # The original paper uses single headed local attention (above). However, the implementation supports multiheaded attention
         # We experiment with this to see if it can improve performance.
@@ -132,6 +156,13 @@ class ContinuousMotionModel(nn.Module):
             look_backward = 1,
             look_forward = 0
         )
+        self.add_hyperparameters_to_WnB_tracking({
+            "local_attention_window_size": 16, 
+            "local_attention_heads": 8, 
+            "local_attention_dim_head": 32,
+            "local_attention_look_backward": 1,
+            "local_attention_causal": True,
+        })
 
         # We reapply the relative positional embeddings before the transformer encoder
         # This is done in the original implementation, but we do it in a slightly different way.
@@ -143,10 +174,17 @@ class ContinuousMotionModel(nn.Module):
         # It may be worth investigating this further, and see if we can find any reason to do it the way they do it.
 
         self.relative_positional_embedding_funtion = SinusoidalEmbeddings(256)
+        self.add_hyperparameters_to_WnB_tracking({
+            "relative_positional_embedding_funtion_post_local_attention": True,
+        })
+            
         
         encoder_layer = nn.TransformerEncoderLayer(d_model=256, nhead=8, batch_first=True)
         self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=6)
-        
+        self.add_hyperparameters_to_WnB_tracking({
+            "transformer_encoder_layers": 6
+        })
+
         # Final transformation, creating the output
         self.final_linear = nn.Linear(256, pose_features_per_frame)
     
@@ -156,6 +194,7 @@ class ContinuousMotionModel(nn.Module):
 
 
     def forward(self, 
+                current_time_step_stacking_level: int,
                 one_hot_style, 
                 audio_features, 
                 noisy_gesture_sequence,
@@ -191,11 +230,11 @@ class ContinuousMotionModel(nn.Module):
         # 1.1.2 - first make the position embedding for timestep 0 and max_number_of_time_steps + 1
 
         timestep_0_pos_embedding = self.time_step_mlp(torch.tensor([0.0]))  # (bs, 1, 1) -> (bs, 1, 64)
-        timestep_max_pos_embedding = self.time_step_mlp(torch.tensor([float(self.num_of_timestep_frames)]))  # (bs, 1, 1) -> (bs, 1, 64)
+        timestep_max_pos_embedding = self.time_step_mlp(torch.tensor([float(self.num_of_timestep_frames * self.max_timestep_stakking_level)]))  # (bs, 1, 1) -> (bs, 1, 64)
 
         # We rescale them to be between 0 and 1 to make it easier for the MLP positional embedding to learn
-        timestep_0_pos_embedding /= self.num_of_timestep_frames
-        timestep_max_pos_embedding /= self.num_of_timestep_frames
+        timestep_0_pos_embedding /= (self.num_of_timestep_frames * self.max_timestep_stakking_level)
+        timestep_max_pos_embedding /= (self.num_of_timestep_frames * self.max_timestep_stakking_level)
 
         self.debugger.capture(("timestep_0_pos_embedding", timestep_0_pos_embedding), [Show.MAX_MIN, Show.IMAGE], 
             keys=["timestep_0_pos_embedding", "timesteps_pos_embedding"])
@@ -204,14 +243,15 @@ class ContinuousMotionModel(nn.Module):
 
         # 1.1.3 - Then we make the positional embedding each of the timestep frames in the sequence
 
-        t_for_each_timestep_frame = torch.arange(self.num_of_timestep_frames).unsqueeze(-1).float()  # (bs, t_for_each_timestep_frame, 1)
-        # TODO: tjeck if this works with bs dim
+        t_for_each_timestep_frame = torch.tensor(
+            self.base_timesteps_at_time_step_stacking_levels[current_time_step_stacking_level]
+        ).unsqueeze(-1).float()  # (bs, t_for_each_timestep_frame, 1)
 
         self.debugger.capture(("t_for_each_timestep_frame", t_for_each_timestep_frame), [Show.MAX_MIN, Show.IMAGE],
             keys=["t_for_each_timestep_frame", "timesteps_pos_embedding"])
 
         # We need to rescale the t_for_each_timestep_frame to be between 0 and 1
-        t_for_each_timestep_frame /= self.num_of_timestep_frames
+        t_for_each_timestep_frame /= (self.num_of_timestep_frames * self.max_timestep_stakking_level)
 
         t_with_pos_embedding_for_each_timestep_frame = self.time_step_mlp(t_for_each_timestep_frame)  # (bs, t_for_each_timestep_frame, 192)
 
@@ -346,3 +386,13 @@ class ContinuousMotionModel(nn.Module):
 
         # 4 - Return the output of the liniear layer
         return output_tensor
+    
+
+
+    # Functions for Weights & Biases tracking
+    def add_hyperparameters_to_WnB_tracking(self, hyperparameter_dict: dict):
+        self.hyperparameter_dict_to_WnB_tracking.update(hyperparameter_dict)
+
+
+    def get_WnB_config_specs(self):
+        return self.hyperparameter_dict_to_WnB_tracking

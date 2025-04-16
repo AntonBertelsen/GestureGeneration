@@ -9,3 +9,4 @@ datasets
 einops
 local-attention
 moviepy # for generatting videos of the defussion and generation processes - mainly for debugging
+wandb
