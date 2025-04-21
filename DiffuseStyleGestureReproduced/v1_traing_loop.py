@@ -61,6 +61,7 @@ def train(
     # Add profiling data structures
     profiling = defaultdict(list)
     visalize_step = 50  # How often to print profiling stats
+    save_step = 1000  # How often to save the model
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
 
@@ -131,7 +132,6 @@ def train(
             data_load_time = time.time() - batch_start_time
             profiling["data_loading"].append(data_load_time)
             
-
             reshape_time = time.time()
 
             # IMPORTANT CHANGE: Handle pre-batched data from RAMResidentDataset
@@ -176,9 +176,10 @@ def train(
 
             # Model forward time
             forward_start = time.time()
-            with autocast(device_type=device, dtype=torch.bfloat16):
+            with autocast(device_type=device.type, dtype=torch.bfloat16):
                 # Convert all inputs to same precision as autocast context
                 output = model(
+                    current_time_step_stacking_level = time_step_stakking_level,
                     one_hot_style = main_agent_id_one_hot,
                     audio_features = audio_features, 
                     noisy_gesture_sequence = noisy_gesture_sequence,
@@ -189,7 +190,7 @@ def train(
 
             # Loss calculation time
             loss_start = time.time()
-            with autocast(device_type=device, dtype=torch.bfloat16):
+            with autocast(device_type=device.type, dtype=torch.bfloat16):
                 # Use the casted target for all loss calculations
                 loss = loss_f(output, gesture_sequence) 
                 loss += variance_loss(output, gesture_sequence) * variance_loss_weight 
@@ -202,6 +203,19 @@ def train(
             progress_bar.set_postfix({'loss': loss.item()})
             loss_rec['train'].append(loss.item())
 
+            # Backward pass time
+            backward_start = time.time()
+            loss.backward()
+            backward_time = time.time() - backward_start
+            profiling["backward"].append(backward_time)
+
+            # Optimizer step time
+            optimizer_start = time.time()
+            # Use the scaler for optimizer step
+            optimizer.step()
+            optimizer_time = time.time() - optimizer_start
+            profiling["optimizer"].append(optimizer_time)
+            
             if i % visalize_step == 0:
                 
                 # log the loss to wandb (W&B)
@@ -215,7 +229,7 @@ def train(
                 loss_rec['train_plot'].append(np.mean(loss_rec['train'][-visalize_step:]))
                 
                 # Visualization code remains unchanged
-                fig, axs = plt.subplots(1, 5, figsize=(30, 6))
+                fig, axs = plt.subplots(1, 5, figsize=(30, 12))
 
                 cmap = 'viridis'
                 vmin = -1
@@ -274,25 +288,19 @@ def train(
                 axs[4].text(0.02, 0.98, profiling_text, transform=axs[4].transAxes, 
                             verticalalignment='top', bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
                 
-                run.log({"train/predoction_illutration": wandb.Image(plt.gcf())}, step=step) # Log the figure to W&B
+                if not debug_run: run.log({"train/predoction_illutration": wandb.Image(plt.gcf())}, step=step) # Log the figure to W&B
                 plt.show()
 
                 visualisation_time = time.time() - visualisation_start
                 print(f"Visualisation time: {visualisation_time:.2f} s")
 
-            # Backward pass time
-            backward_start = time.time()
-            loss.backward()
-            backward_time = time.time() - backward_start
-            profiling["backward"].append(backward_time)
+            if i % save_step == 0:
+                # Save the model state dict
+                if not debug_run: run.save(f"model_epoch_{epoch}_step_{i}.pth")
+                # Save locally as well
+                torch.save(model.state_dict(), f"model_epoch_{epoch}_step_{i}.pth")
+                print(f"Model saved at epoch {epoch}, step {i}")
 
-            # Optimizer step time
-            optimizer_start = time.time()
-            # Use the scaler for optimizer step
-            optimizer.step()
-            optimizer_time = time.time() - optimizer_start
-            profiling["optimizer"].append(optimizer_time)
-            
             # Start timing for next batch
             batch_start_time = time.time()
 
@@ -336,7 +344,7 @@ def train(
         # clear_output(wait=True)
     
     # When all of the epochs are over, the entire list of training loss and validation loss are returned.
-    run.finish() # close the wandb (W&B) run
+    if not debug_run: run.finish() # close the wandb (W&B) run
     return model # loss_rec['train'] #, loss_rec['val']
 
 

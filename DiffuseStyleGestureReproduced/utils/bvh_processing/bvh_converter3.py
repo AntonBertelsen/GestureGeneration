@@ -272,37 +272,100 @@ class OffsetBVHParser:
         # Combine into 6D representation
         return np.hstack([col1, col2])  # Shape: (num_frames, 6)
     
-    def _6d_to_euler_batch(self, rot_6d_batch: np.ndarray) -> np.ndarray:
-        num_frames = rot_6d_batch.shape[0]
+    # def _6d_to_euler_batch(self, rot_6d_batch: np.ndarray) -> np.ndarray:
+    #     num_frames = rot_6d_batch.shape[0]
         
-        # Extract columns
-        col1 = rot_6d_batch[:, 0:3]  # Shape: (num_frames, 3)
-        col2 = rot_6d_batch[:, 3:6]  # Shape: (num_frames, 3)
+    #     # Extract columns
+    #     col1 = rot_6d_batch[:, 0:3]  # Shape: (num_frames, 3)
+    #     col2 = rot_6d_batch[:, 3:6]  # Shape: (num_frames, 3)
         
-        # Normalize columns (vectorized)
-        col1_norm = np.linalg.norm(col1, axis=1, keepdims=True)
-        col2_norm = np.linalg.norm(col2, axis=1, keepdims=True)
-        col1 = col1 / col1_norm
-        col2 = col2 / col2_norm
+    #     # Normalize columns (vectorized)
+    #     col1_norm = np.linalg.norm(col1, axis=1, keepdims=True)
+    #     col2_norm = np.linalg.norm(col2, axis=1, keepdims=True)
+    #     col1 = col1 / col1_norm
+    #     col2 = col2 / col2_norm
         
-        # Compute cross product for third column (vectorized)
-        col3 = np.cross(col1, col2)
+    #     # Compute cross product for third column (vectorized)
+    #     col3 = np.cross(col1, col2)
         
-        # Stack into rotation matrices
-        matrices = np.zeros((num_frames, 3, 3))
-        matrices[:, :, 0] = col1
-        matrices[:, :, 1] = col2
-        matrices[:, :, 2] = col3
+    #     # Stack into rotation matrices
+    #     matrices = np.zeros((num_frames, 3, 3))
+    #     matrices[:, :, 0] = col1
+    #     matrices[:, :, 1] = col2
+    #     matrices[:, :, 2] = col3
         
-        # Convert to rotation objects
-        rot = R.from_matrix(matrices)
+    #     # Convert to rotation objects
+    #     rot = R.from_matrix(matrices)
         
-        # Convert to Euler angles in ZXY order
-        euler_zxy = rot.as_euler('zxy', degrees=True)
+    #     # Convert to Euler angles in ZXY order
+    #     euler_zxy = rot.as_euler('zxy', degrees=True)
 
-        # Rearrange from [z,x,y] back to [x,y,z]
+    #     # Rearrange from [z,x,y] back to [x,y,z]
+    #     return euler_zxy
+
+    def _6d_to_euler_batch(self, rot_6d_batch: torch.Tensor) -> np.ndarray:
+        # Define fallback identity rotation
+        fallback_6d = torch.tensor([1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                                device=rot_6d_batch.device,
+                                dtype=rot_6d_batch.dtype).unsqueeze(0)
+
+        # Split into columns
+        col1 = rot_6d_batch[:, 0:3]
+        col2 = rot_6d_batch[:, 3:6]
+
+        # Normalize col1
+        col1 = col1 / (col1.norm(dim=1, keepdim=True) + 1e-8)
+
+        # Make col2 orthogonal to col1
+        dot = torch.sum(col1 * col2, dim=1, keepdim=True)
+        col2 = col2 - dot * col1
+        col2_norm = col2.norm(dim=1, keepdim=True)
+
+        # Detect unstable col2 (too small norm)
+        invalid_mask = (col2_norm < 1e-4).squeeze()
+
+        if invalid_mask.any():
+            # print(f"[WARNING] Replacing {invalid_mask.sum().item()} unstable 6D inputs with fallback")
+            rot_6d_batch[invalid_mask] = fallback_6d
+
+            # Recompute col1 and col2 safely for all (since some got replaced)
+            col1 = rot_6d_batch[:, 0:3]
+            col2 = rot_6d_batch[:, 3:6]
+            col1 = col1 / (col1.norm(dim=1, keepdim=True) + 1e-8)
+            dot = torch.sum(col1 * col2, dim=1, keepdim=True)
+            col2 = col2 - dot * col1
+            col2 = col2 / (col2.norm(dim=1, keepdim=True) + 1e-8)
+        else:
+            # Safe to normalize col2
+            col2 = col2 / (col2_norm + 1e-8)
+
+        # Construct col3
+        col3 = torch.cross(col1, col2, dim=1)
+        matrices = torch.stack((col1, col2, col3), dim=2)
+
+        # Validate rotation matrix validity (check determinant)
+        det = torch.det(matrices.float())
+        invalid_det_mask = det <= 0
+        if invalid_det_mask.any():
+            # print(f"[WARNING] Replacing {invalid_det_mask.sum().item()} invalid matrices with identity")
+            matrices[invalid_det_mask] = torch.eye(3, device=matrices.device, dtype=matrices.dtype)
+
+        # Validate matrices for non-finite values
+        if not torch.all(torch.isfinite(matrices)):
+            bad_indices = ~torch.isfinite(matrices).all(dim=(1, 2))
+            print("Found non-finite matrices at indices:", torch.where(bad_indices)[0])
+            print("Problematic matrices:", matrices[bad_indices])
+            print("Original 6D input for bad matrices:", rot_6d_batch[bad_indices])
+            raise ValueError("Non-finite values found in rotation matrices")
+
+        matrices_np = matrices.float().cpu().numpy()
+
+        # Convert to Euler angles using scipy
+        rot = R.from_matrix(matrices_np)
+        euler_zxy = rot.as_euler('zxy', degrees=True)
         return euler_zxy
-    
+
+
     def get_all_joints(self) -> List[str]:
         return self.joints
     
@@ -429,13 +492,16 @@ class OffsetBVHParser:
         """
         # Handle single frame or batch
         if frame_idx is not None:
-            frames_to_process = [features[frame_idx:frame_idx+1]]
+            frames_to_process = features[0,frame_idx:frame_idx+1]
             single_frame = True
         else:
             frames_to_process = features
             single_frame = False
-        
+
         result_frames = []
+        print("Is single frame:", single_frame)
+        print("Features shape:", features.shape)
+        print("Frames to process shape:", frames_to_process.shape)
         
         # Get bone names for each rotation map entry
         bone_names = []

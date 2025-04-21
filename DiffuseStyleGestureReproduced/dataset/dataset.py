@@ -172,12 +172,19 @@ class SingleSampleAnimationDataset(Dataset):
             seed_chunk = npz["bvh_features"][start_frame : start_frame + self.seed_length_in_frames]
             audio_chunk = npz["audio_features"][start_frame + self.seed_length_in_frames : start_frame + self.chunk_size]
             speaker = npz["main_agent_id_one_hot"]
+            full_audio_features = npz["audio_features"]
         
         # Convert to half precision for consistency with ConsolidatedRAMDataset
         gesture = torch.tensor(gesture_chunk, dtype=torch.float16)
         seed = torch.tensor(seed_chunk, dtype=torch.float16)
         audio = torch.tensor(audio_chunk, dtype=torch.float16)
         speaker = torch.tensor(speaker, dtype=torch.float16)
+
+        # Full audio features
+        full_audio_features_tensor = torch.tensor(full_audio_features, dtype=torch.float16)
+
+        # start_frame has to be a tensor for the collate function to work
+        start_frame_tensor = torch.tensor(start_frame, dtype=torch.int64)
         
         # Apply normalization to gestures
         gesture = (gesture - self.mean_pose) / self.std_pose
@@ -218,7 +225,7 @@ class SingleSampleAnimationDataset(Dataset):
         # WAV FILE EXTRACTION
         ##################################################################################
         
-        return gesture_batch, seed_batch, audio_batch, speaker_batch
+        return gesture_batch, seed_batch, audio_batch, speaker_batch, full_audio_features_tensor, start_frame_tensor
 
 class FixedSampleAnimationDataset(Dataset):
     def __init__(self, folder, seq_length_in_frames=150, seed_length_in_frames=8, 
