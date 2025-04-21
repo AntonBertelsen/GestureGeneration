@@ -186,7 +186,9 @@ DiffuseStyleGestureReproduced/dataset/*
 DiffuseStyleGestureReproduced/debug_files/*
 
 # Ignore everything inside bvh_tests/
-DiffuseStyleGestureReproduced/bvh_tests/*
+DiffuseStyleGestureReproduced/bvh_tests/results/*
+DiffuseStyleGestureReproduced/bvh_testsfeatures/*
+DiffuseStyleGestureReproduced/bvh_tests/bvh/*
 
 
 # Landscape for diffusion test
