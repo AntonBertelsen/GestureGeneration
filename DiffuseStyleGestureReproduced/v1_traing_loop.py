@@ -43,11 +43,14 @@ def acceleration_loss(pred, gt):
 def train(
         experiment_collection_name: str, # name of the gruope of experiments, this run is a part of
         debug_run: bool, # shold log to wandb or not 
+        model_checkpoint_dir: str, # dir of the model checkpoint to load from
         model,
         device,
         training_loader,
         val_loader, 
         num_epochs: int, 
+        model_check_point_interval_in_steps: int = 1000, # how often to save the model checkpoint
+        uplaod_model_check_point: bool = False, # should upload the model checkpoint to wandb
         condition_mask_probabilty=0.1,  # TODO: should be in model, as hyper param, not here
         lr=0.0003,
         variance_loss_weight=0.1,
@@ -56,12 +59,12 @@ def train(
 
 
     diffusion = model.deffsion_noise_scheduler
+    current_model_name = f"{experiment_collection_name}_started_{time.strftime('%Y-%m-%d_%H-%M-%S')}"
 
 
     # Add profiling data structures
     profiling = defaultdict(list)
     visalize_step = 50  # How often to print profiling stats
-    save_step = 1000  # How often to save the model
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
 
@@ -76,7 +79,7 @@ def train(
         run = wandb.init(
             project="v1_sliding_diffusion", 
             group=experiment_collection_name,
-            name=f"{experiment_collection_name}_{time.strftime('%Y-%m-%d_%H-%M-%S')}",
+            name=current_model_name,
             entity="", # W&B username or team, when its empty, it will use the default team
             config={
                 # Training hyper parameters
@@ -101,20 +104,16 @@ def train(
             }
         )
 
-    
-    # The current lowest validation loss gets defined as an infinitely large number in order to make sure that 
-    # it gets reduced in the first epoch. .
-    current_min_val_loss = np.inf
-
     # I then move the model to the device that is being used and put in traning mode
     model = model.to(device)
     # model = torch.compile(model, backend="cudagraphs")
-    print("Model compling to cudagraphs runtime")
+    # print("Model compling to cudagraphs runtime")
     model.train()
     
     # I then define a map of lists used for tracking the training and validation loss for each epoch. 
     # I'll later use these two sets to plot the progress of the model training.
     loss_rec = {'train' : [], 'val' : [], 'train_plot': []}
+    best_loss_rec = {'train' : np.inf, 'val' : np.inf}
     
     # This is the main training loop that goes through the entire dataset and trains the model on it for each epoch.
     for epoch in range(num_epochs):
@@ -132,6 +131,7 @@ def train(
             data_load_time = time.time() - batch_start_time
             profiling["data_loading"].append(data_load_time)
             
+
             reshape_time = time.time()
 
             # IMPORTANT CHANGE: Handle pre-batched data from RAMResidentDataset
@@ -196,6 +196,7 @@ def train(
                 loss += variance_loss(output, gesture_sequence) * variance_loss_weight 
                 loss += velocity_loss(output, gesture_sequence) * velocity_loss_weight 
                 loss += acceleration_loss(output, gesture_sequence) * acceleration_loss_weight
+
             loss_time = time.time() - loss_start
             profiling["loss_calculation"].append(loss_time)
 
@@ -203,19 +204,28 @@ def train(
             progress_bar.set_postfix({'loss': loss.item()})
             loss_rec['train'].append(loss.item())
 
-            # Backward pass time
-            backward_start = time.time()
-            loss.backward()
-            backward_time = time.time() - backward_start
-            profiling["backward"].append(backward_time)
 
-            # Optimizer step time
-            optimizer_start = time.time()
-            # Use the scaler for optimizer step
-            optimizer.step()
-            optimizer_time = time.time() - optimizer_start
-            profiling["optimizer"].append(optimizer_time)
-            
+            # update the best loss record and maybe save the model checkpoint
+            if epoch == 0 or epoch == 1:
+                next_checkpount_epoch = model_check_point_interval_in_steps
+
+            if loss.item() < best_loss_rec['train']:
+                best_loss_rec['train'] = loss.item()
+
+                # Saveing the model checkpoint
+                if (epoch + 1) > next_checkpount_epoch == 0 and not debug_run:
+                    next_checkpount_epoch += model_check_point_interval_in_epochs
+                    checkpoint_path = f"{model_checkpoint_dir}/{current_model_name}/{current_model_name}_epoch_{epoch + 1}.pth"
+                    torch.save(model.state_dict(), checkpoint_path)
+                    print(f"Model checkpoint saved at {checkpoint_path} under the name {checkpoint_path} at loss: {loss.item()}")
+
+                    if uplaod_model_check_point:
+                        artifact = wandb.Artifact('current_model_name', type='model')
+                        artifact.add_file('model.pth')
+                        wandb.log_artifact(artifact)
+        
+
+            # Visualization
             if i % visalize_step == 0:
                 
                 # log the loss to wandb (W&B)
@@ -294,13 +304,29 @@ def train(
                 visualisation_time = time.time() - visualisation_start
                 print(f"Visualisation time: {visualisation_time:.2f} s")
 
-            if i % save_step == 0:
-                # Save the model state dict
-                if not debug_run: run.save(f"model_epoch_{epoch}_step_{i}.pth")
-                # Save locally as well
-                torch.save(model.state_dict(), f"model_epoch_{epoch}_step_{i}.pth")
-                print(f"Model saved at epoch {epoch}, step {i}")
+            # Backward pass time
+            backward_start = time.time()
+            # Use the scaler to handle the backward pass with mixed precision
+            
+            print("Checking for float16 tensors before backward...")
+            for name, param in model.named_parameters():
+                if param.dtype == torch.float16:
+                    print(f"Found parameter {name} with dtype {param.dtype}")
+                    # Optionally convert it
+                    param.data = param.data.to(torch.float32)
+            
+            loss.backward()
 
+            backward_time = time.time() - backward_start
+            profiling["backward"].append(backward_time)
+
+            # Optimizer step time
+            optimizer_start = time.time()
+            # Use the scaler for optimizer step
+            optimizer.step()
+            optimizer_time = time.time() - optimizer_start
+            profiling["optimizer"].append(optimizer_time)
+            
             # Start timing for next batch
             batch_start_time = time.time()
 
