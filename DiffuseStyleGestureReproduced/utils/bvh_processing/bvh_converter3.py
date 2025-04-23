@@ -499,9 +499,6 @@ class OffsetBVHParser:
             single_frame = False
 
         result_frames = []
-        print("Is single frame:", single_frame)
-        print("Features shape:", features.shape)
-        print("Frames to process shape:", frames_to_process.shape)
         
         # Get bone names for each rotation map entry
         bone_names = []
