@@ -34,6 +34,8 @@ if __name__ == "__main__":
     trained_model = train(
         debug_run=True,
         experiment_collection_name="first_tests",
+        model_check_point_interval_in_epocs = 2, # how often to save the model checkpoint - set to infinity to disable
+        uplaod_model_check_point = False, # should upload the model checkpoint to wandb
         device=device,
         model=ContinuousMotionModel(
             deffsion_noise_scheduler=Diffusion(
@@ -66,5 +68,5 @@ if __name__ == "__main__":
                 pin_memory = True
             ),
         val_loader=None, 
-        num_epochs=1
+        num_epochs=100
     )

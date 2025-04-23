@@ -49,7 +49,7 @@ def train(
         training_loader,
         val_loader, 
         num_epochs: int, 
-        model_check_point_interval_in_steps: int = 1000, # how often to save the model checkpoint
+        model_check_point_interval_in_epocs: int = 2, # how often to save the model checkpoint
         uplaod_model_check_point: bool = False, # should upload the model checkpoint to wandb
         condition_mask_probabilty=0.1,  # TODO: should be in model, as hyper param, not here
         lr=0.0003,
@@ -207,15 +207,15 @@ def train(
 
             # update the best loss record and maybe save the model checkpoint
             if epoch == 0 or epoch == 1:
-                next_checkpount_epoch = model_check_point_interval_in_steps
+                next_checkpount_epoch = model_check_point_interval_in_epocs
 
             if loss.item() < best_loss_rec['train']:
                 best_loss_rec['train'] = loss.item()
 
                 # Saveing the model checkpoint
-                if (epoch + 1) > next_checkpount_epoch == 0 and not debug_run:
-                    next_checkpount_epoch += model_check_point_interval_in_epochs
-                    checkpoint_path = f"{model_checkpoint_dir}/{current_model_name}/{current_model_name}_epoch_{epoch + 1}.pth"
+                if epoch >= next_checkpount_epoch == 0 and not debug_run:
+                    next_checkpount_epoch += model_check_point_interval_in_epocs
+                    checkpoint_path = f"{model_checkpoint_dir}/{current_model_name}/{current_model_name}_epoch_{epoch}.pth"
                     torch.save(model.state_dict(), checkpoint_path)
                     print(f"Model checkpoint saved at {checkpoint_path} under the name {checkpoint_path} at loss: {loss.item()}")
 

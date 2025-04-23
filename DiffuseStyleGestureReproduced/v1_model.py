@@ -16,7 +16,8 @@ class ContinuousMotionModel(nn.Module):
                 number_of_styles: int,                      # Number of unique styles. In this context this is the number of speakers, since we treat each speaker as a style 
                 audio_features_per_frame: int,              # Number of audio features per frame. This is a mixture of prosodic features, onsets, wavlm, etc.
                 pose_features_per_frame: int, 
-                number_of_attention_heads: int = 8, 
+                number_of_attention_heads: int = 8,
+                 
                 debugger: Debugger = Debugger(False)):      # Number of pose features per frame. These are the rotations / translations of the bones in the character skeleton. We may not pay attention to every channel for every bone, or every bone. 
         super().__init__()
 

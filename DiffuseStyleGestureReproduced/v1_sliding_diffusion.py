@@ -1,23 +1,7 @@
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import torch.optim as optim
-import numpy as np
-from local_attention import transformer
-from local_attention.rotary import SinusoidalEmbeddings, apply_rotary_pos_emb
-import matplotlib.pyplot as plt
 from typing import Union
-from io import BytesIO
-from PIL import Image
-from moviepy import ImageSequenceClip
-from datetime import datetime
-
-from einops import rearrange
-
-
 import math
 from typing import Callable
-
 from WnB_trackable import WnBTrackable
 
 
@@ -234,34 +218,3 @@ class Diffusion(WnBTrackable):
             "number_of_deffusion_steps_for_each_frame": self.num_of_timestep_frames * self.num_of_timestap_stackings,
             **self.noise_schedule_hyper_params,
         }
-
-
-
-def split_vector(num_of_strib_collections: int, vector):
-    """
-    Split the input vector into num_of_strib_collections separate vectors.
-    e.g. if the input is a 1D vector of length 3 * num_of_strib_collections,
-    
-    [a1, b1, c1, a2, b2, c2, a3, b3, c3, ...]
-    
-    and the output will be:
-    
-    [a1, a2, a3, ...], [b1, b2, b3, ...], [c1, c2, c3, ...]
-    """
-
-    if vector.dim() != 1:
-        raise ValueError("Input tensor must be one-dimensional.")
-
-    total_elements = vector.numel()
-    if total_elements % num_of_strib_collections != 0:
-        raise ValueError("Length of tensor must be divisible by num_of_strib_collections.")
-    
-    # Compute the number of rows (elements per output tensor)
-    num_rows = total_elements // num_of_strib_collections
-    
-    # Reshape to a 2D tensor where each row corresponds to a block
-    reshaped = vector.reshape(num_rows, num_of_strib_collections)
-    
-    # Split the reshaped tensor column-wise into separate tensors
-    output_tensors = [reshaped[:, i] for i in range(num_of_strib_collections)]
-    return output_tensors
