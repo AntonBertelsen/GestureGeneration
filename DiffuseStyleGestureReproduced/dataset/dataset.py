@@ -182,9 +182,6 @@ class SingleSampleAnimationDataset(Dataset):
 
         # Full audio features
         full_audio_features_tensor = torch.tensor(full_audio_features, dtype=torch.float16)
-
-        # start_frame has to be a tensor for the collate function to work
-        start_frame_tensor = torch.tensor(start_frame, dtype=torch.int64)
         
         # Apply normalization to gestures
         gesture = (gesture - self.mean_pose) / self.std_pose
@@ -200,32 +197,32 @@ class SingleSampleAnimationDataset(Dataset):
         ##################################################################################
         
         # Find the corresponding wav file in the 'wav' folder and extract the corresponding time
-        print(file)
-        wav_file = os.path.join(os.path.dirname(os.path.dirname(file)), 'wav', os.path.basename(file).replace('.npz', '_main-agent.wav'))
-        if not os.path.exists(wav_file):
-            raise ValueError(f"Corresponding wav file {wav_file} not found.")
+        # print(file)
+        # wav_file = os.path.join(os.path.dirname(os.path.dirname(file)), 'wav', os.path.basename(file).replace('.npz', '_main-agent.wav'))
+        # if not os.path.exists(wav_file):
+        #     raise ValueError(f"Corresponding wav file {wav_file} not found.")
 
-        # Read the wav file
-        audio_data, samplerate = sf.read(wav_file)
+        # # Read the wav file
+        # audio_data, samplerate = sf.read(wav_file)
 
-        # Calculate the start and end times in seconds
-        start_time = start_frame / 30.0
-        end_time = (start_frame + self.chunk_size) / 30.0
+        # # Calculate the start and end times in seconds
+        # start_time = start_frame / 30.0
+        # end_time = (start_frame + self.chunk_size) / 30.0
 
-        # Extract the corresponding audio snippet
-        start_sample = int(start_time * samplerate)
-        end_sample = int(end_time * samplerate)
-        audio_snippet = audio_data[start_sample:end_sample]
+        # # Extract the corresponding audio snippet
+        # start_sample = int(start_time * samplerate)
+        # end_sample = int(end_time * samplerate)
+        # audio_snippet = audio_data[start_sample:end_sample]
 
-        # Save the audio snippet one folder up from the dataset folder
-        output_wav_file = os.path.join(os.path.dirname(self.folder), 'audio_snippet.wav')
-        sf.write(output_wav_file, audio_snippet, samplerate)
+        # # Save the audio snippet one folder up from the dataset folder
+        # output_wav_file = os.path.join(os.path.dirname(self.folder), 'audio_snippet.wav')
+        # sf.write(output_wav_file, audio_snippet, samplerate)
 
         ##################################################################################
         # WAV FILE EXTRACTION
         ##################################################################################
         
-        return gesture_batch, seed_batch, audio_batch, speaker_batch, full_audio_features_tensor, start_frame_tensor
+        return gesture_batch, seed_batch, audio_batch, speaker_batch, full_audio_features_tensor, start_frame, file
 
 class FixedSampleAnimationDataset(Dataset):
     def __init__(self, folder, seq_length_in_frames=150, seed_length_in_frames=8, 

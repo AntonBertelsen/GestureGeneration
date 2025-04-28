@@ -15,6 +15,8 @@ from IPython.display import clear_output
 import time
 from collections import defaultdict
 
+import os
+
 import wandb
 
 
@@ -65,6 +67,7 @@ def train(
     # Add profiling data structures
     profiling = defaultdict(list)
     visalize_step = 50  # How often to print profiling stats
+    save_Step = 1000  # How often to save the model checkpoint
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
 
@@ -124,6 +127,10 @@ def train(
         
         # Start batch timer
         batch_start_time = time.time()
+
+        # reshuffle the training data at the start of each epoch
+        training_loader.dataset._reshuffle()
+
 
         # During the epoch, all the data items are iterated over.
         for i, batch_data in enumerate(progress_bar):
@@ -206,24 +213,39 @@ def train(
 
 
             # update the best loss record and maybe save the model checkpoint
-            if epoch == 0 or epoch == 1:
-                next_checkpount_epoch = model_check_point_interval_in_epocs
+            # if epoch == 0 or epoch == 1:
+            #     next_checkpount_epoch = model_check_point_interval_in_epocs
 
-            if loss.item() < best_loss_rec['train']:
-                best_loss_rec['train'] = loss.item()
+            # if loss.item() < best_loss_rec['train']:
+            #     best_loss_rec['train'] = loss.item()
 
-                # Saveing the model checkpoint
-                if epoch >= next_checkpount_epoch == 0 and not debug_run:
-                    next_checkpount_epoch += model_check_point_interval_in_epocs
-                    checkpoint_path = f"{model_checkpoint_dir}/{current_model_name}/{current_model_name}_epoch_{epoch}.pth"
-                    torch.save(model.state_dict(), checkpoint_path)
-                    print(f"Model checkpoint saved at {checkpoint_path} under the name {checkpoint_path} at loss: {loss.item()}")
+            #     # Saveing the model checkpoint
+            #     if epoch >= next_checkpount_epoch == 0 and not debug_run:
+            #         next_checkpount_epoch += model_check_point_interval_in_epocs
+            #         checkpoint_path = f"{model_checkpoint_dir}/{current_model_name}/{current_model_name}_epoch_{epoch}.pth"
+            #         torch.save(model.state_dict(), checkpoint_path)
+            #         print(f"Model checkpoint saved at {checkpoint_path} under the name {checkpoint_path} at loss: {loss.item()}")
+            # 
+            #         if uplaod_model_check_point:
+            #             artifact = wandb.Artifact('current_model_name', type='model')
+            #             artifact.add_file('model.pth')
+            #             wandb.log_artifact(artifact)
 
-                    if uplaod_model_check_point:
-                        artifact = wandb.Artifact('current_model_name', type='model')
-                        artifact.add_file('model.pth')
-                        wandb.log_artifact(artifact)
-        
+            # Backward pass time
+            backward_start = time.time()
+            # Use the scaler to handle the backward pass with mixed precision
+                        
+            loss.backward()
+
+            backward_time = time.time() - backward_start
+            profiling["backward"].append(backward_time)
+
+            # Optimizer step time
+            optimizer_start = time.time()
+            # Use the scaler for optimizer step
+            optimizer.step()
+            optimizer_time = time.time() - optimizer_start
+            profiling["optimizer"].append(optimizer_time)
 
             # Visualization
             if i % visalize_step == 0:
@@ -304,33 +326,22 @@ def train(
                 visualisation_time = time.time() - visualisation_start
                 print(f"Visualisation time: {visualisation_time:.2f} s")
 
-            # Backward pass time
-            backward_start = time.time()
-            # Use the scaler to handle the backward pass with mixed precision
-            
-            print("Checking for float16 tensors before backward...")
-            for name, param in model.named_parameters():
-                if param.dtype == torch.float16:
-                    print(f"Found parameter {name} with dtype {param.dtype}")
-                    # Optionally convert it
-                    param.data = param.data.to(torch.float32)
-            
-            loss.backward()
+            if i % save_Step == 0:
+                # Save the model checkpoint
+                checkpoint_path = f"{model_checkpoint_dir}/{current_model_name}/{current_model_name}_epoch_{epoch}_step_{i}.pth"
+                # Create the directory if it doesn't exist
+                os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
+                torch.save(model.state_dict(), checkpoint_path)
+                print(f"Model checkpoint saved at {checkpoint_path} under the name {checkpoint_path} at loss: {loss.item()}")
+                
+                if uplaod_model_check_point:
+                    artifact = wandb.Artifact('current_model_name', type='model')
+                    artifact.add_file(checkpoint_path)
+                    wandb.log_artifact(artifact)
 
-            backward_time = time.time() - backward_start
-            profiling["backward"].append(backward_time)
-
-            # Optimizer step time
-            optimizer_start = time.time()
-            # Use the scaler for optimizer step
-            optimizer.step()
-            optimizer_time = time.time() - optimizer_start
-            profiling["optimizer"].append(optimizer_time)
-            
             # Start timing for next batch
             batch_start_time = time.time()
 
-        
         # After the training loop, the launch on the validation set is calculated in the same way as on 
         # the training set, but without the gradient descent and transformation of the model premises.
         

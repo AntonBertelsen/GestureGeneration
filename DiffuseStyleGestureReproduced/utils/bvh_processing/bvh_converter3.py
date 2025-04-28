@@ -3,6 +3,9 @@ import torch
 import re
 from scipy.spatial.transform import Rotation as R
 from typing import List, Tuple, Dict, Set, Optional, Union
+import base64
+import io
+import soundfile as sf
 
 class OffsetBVHParser:
     def __init__(self, file_path: str, target_joints: Optional[List[str]] = None):
@@ -260,7 +263,7 @@ class OffsetBVHParser:
     def _euler_to_6d_batch(self, euler_batch: np.ndarray) -> np.ndarray:
         
         # Create rotation objects (handles all frames at once)
-        rot = R.from_euler('zxy', euler_batch, degrees=True)
+        rot = R.from_euler('ZXY', euler_batch, degrees=True)
         
         # Get rotation matrices
         matrices = rot.as_matrix()  # Shape: (num_frames, 3, 3)
@@ -272,98 +275,98 @@ class OffsetBVHParser:
         # Combine into 6D representation
         return np.hstack([col1, col2])  # Shape: (num_frames, 6)
     
-    # def _6d_to_euler_batch(self, rot_6d_batch: np.ndarray) -> np.ndarray:
-    #     num_frames = rot_6d_batch.shape[0]
-        
-    #     # Extract columns
-    #     col1 = rot_6d_batch[:, 0:3]  # Shape: (num_frames, 3)
-    #     col2 = rot_6d_batch[:, 3:6]  # Shape: (num_frames, 3)
-        
-    #     # Normalize columns (vectorized)
-    #     col1_norm = np.linalg.norm(col1, axis=1, keepdims=True)
-    #     col2_norm = np.linalg.norm(col2, axis=1, keepdims=True)
-    #     col1 = col1 / col1_norm
-    #     col2 = col2 / col2_norm
-        
-    #     # Compute cross product for third column (vectorized)
-    #     col3 = np.cross(col1, col2)
-        
-    #     # Stack into rotation matrices
-    #     matrices = np.zeros((num_frames, 3, 3))
-    #     matrices[:, :, 0] = col1
-    #     matrices[:, :, 1] = col2
-    #     matrices[:, :, 2] = col3
-        
-    #     # Convert to rotation objects
-    #     rot = R.from_matrix(matrices)
-        
-    #     # Convert to Euler angles in ZXY order
-    #     euler_zxy = rot.as_euler('zxy', degrees=True)
-
-    #     # Rearrange from [z,x,y] back to [x,y,z]
-    #     return euler_zxy
-
     def _6d_to_euler_batch(self, rot_6d_batch: torch.Tensor) -> np.ndarray:
-        # Define fallback identity rotation
-        fallback_6d = torch.tensor([1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
-                                device=rot_6d_batch.device,
-                                dtype=rot_6d_batch.dtype).unsqueeze(0)
+        num_frames = rot_6d_batch.shape[0]
+        
+        # Extract columns
+        col1 = rot_6d_batch[:, 0:3]  # Shape: (num_frames, 3)
+        col2 = rot_6d_batch[:, 3:6]  # Shape: (num_frames, 3)
+        
+        # Normalize columns (vectorized)
+        col1_norm = torch.linalg.norm(col1, axis=1, keepdims=True)
+        col2_norm = torch.linalg.norm(col2, axis=1, keepdims=True)
+        col1 = col1 / col1_norm
+        col2 = col2 / col2_norm
+        
+        # Compute cross product for third column (vectorized)
+        col3 = torch.cross(col1, col2)
+        
+        # Stack into rotation matrices
+        matrices = torch.zeros((num_frames, 3, 3))
+        matrices[:, :, 0] = col1
+        matrices[:, :, 1] = col2
+        matrices[:, :, 2] = col3
+        
+        # Convert to rotation objects
+        rot = R.from_matrix(matrices)
+        
+        # Convert to Euler angles in ZXY order
+        euler_zxy = rot.as_euler('ZXY', degrees=True)
 
-        # Split into columns
-        col1 = rot_6d_batch[:, 0:3]
-        col2 = rot_6d_batch[:, 3:6]
-
-        # Normalize col1
-        col1 = col1 / (col1.norm(dim=1, keepdim=True) + 1e-8)
-
-        # Make col2 orthogonal to col1
-        dot = torch.sum(col1 * col2, dim=1, keepdim=True)
-        col2 = col2 - dot * col1
-        col2_norm = col2.norm(dim=1, keepdim=True)
-
-        # Detect unstable col2 (too small norm)
-        invalid_mask = (col2_norm < 1e-4).squeeze()
-
-        if invalid_mask.any():
-            # print(f"[WARNING] Replacing {invalid_mask.sum().item()} unstable 6D inputs with fallback")
-            rot_6d_batch[invalid_mask] = fallback_6d
-
-            # Recompute col1 and col2 safely for all (since some got replaced)
-            col1 = rot_6d_batch[:, 0:3]
-            col2 = rot_6d_batch[:, 3:6]
-            col1 = col1 / (col1.norm(dim=1, keepdim=True) + 1e-8)
-            dot = torch.sum(col1 * col2, dim=1, keepdim=True)
-            col2 = col2 - dot * col1
-            col2 = col2 / (col2.norm(dim=1, keepdim=True) + 1e-8)
-        else:
-            # Safe to normalize col2
-            col2 = col2 / (col2_norm + 1e-8)
-
-        # Construct col3
-        col3 = torch.cross(col1, col2, dim=1)
-        matrices = torch.stack((col1, col2, col3), dim=2)
-
-        # Validate rotation matrix validity (check determinant)
-        det = torch.det(matrices.float())
-        invalid_det_mask = det <= 0
-        if invalid_det_mask.any():
-            # print(f"[WARNING] Replacing {invalid_det_mask.sum().item()} invalid matrices with identity")
-            matrices[invalid_det_mask] = torch.eye(3, device=matrices.device, dtype=matrices.dtype)
-
-        # Validate matrices for non-finite values
-        if not torch.all(torch.isfinite(matrices)):
-            bad_indices = ~torch.isfinite(matrices).all(dim=(1, 2))
-            print("Found non-finite matrices at indices:", torch.where(bad_indices)[0])
-            print("Problematic matrices:", matrices[bad_indices])
-            print("Original 6D input for bad matrices:", rot_6d_batch[bad_indices])
-            raise ValueError("Non-finite values found in rotation matrices")
-
-        matrices_np = matrices.float().cpu().numpy()
-
-        # Convert to Euler angles using scipy
-        rot = R.from_matrix(matrices_np)
-        euler_zxy = rot.as_euler('zxy', degrees=True)
+        # Rearrange from [z,x,y] back to [x,y,z]
         return euler_zxy
+
+    # def _6d_to_euler_batch(self, rot_6d_batch: torch.Tensor) -> np.ndarray:
+    #     # Define fallback identity rotation
+    #     fallback_6d = torch.tensor([1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+    #                             device=rot_6d_batch.device,
+    #                             dtype=rot_6d_batch.dtype).unsqueeze(0)
+
+    #     # Split into columns
+    #     col1 = rot_6d_batch[:, 0:3]
+    #     col2 = rot_6d_batch[:, 3:6]
+
+    #     # Normalize col1
+    #     col1 = col1 / (col1.norm(dim=1, keepdim=True) + 1e-8)
+
+    #     # Make col2 orthogonal to col1
+    #     dot = torch.sum(col1 * col2, dim=1, keepdim=True)
+    #     col2 = col2 - dot * col1
+    #     col2_norm = col2.norm(dim=1, keepdim=True)
+
+    #     # Detect unstable col2 (too small norm)
+    #     invalid_mask = (col2_norm < 1e-4).squeeze()
+
+    #     if invalid_mask.any():
+    #         # print(f"[WARNING] Replacing {invalid_mask.sum().item()} unstable 6D inputs with fallback")
+    #         rot_6d_batch[invalid_mask] = fallback_6d
+
+    #         # Recompute col1 and col2 safely for all (since some got replaced)
+    #         col1 = rot_6d_batch[:, 0:3]
+    #         col2 = rot_6d_batch[:, 3:6]
+    #         col1 = col1 / (col1.norm(dim=1, keepdim=True) + 1e-8)
+    #         dot = torch.sum(col1 * col2, dim=1, keepdim=True)
+    #         col2 = col2 - dot * col1
+    #         col2 = col2 / (col2.norm(dim=1, keepdim=True) + 1e-8)
+    #     else:
+    #         # Safe to normalize col2
+    #         col2 = col2 / (col2_norm + 1e-8)
+
+    #     # Construct col3
+    #     col3 = torch.cross(col1, col2, dim=1)
+    #     matrices = torch.stack((col1, col2, col3), dim=2)
+
+    #     # Validate rotation matrix validity (check determinant)
+    #     det = torch.det(matrices.float())
+    #     invalid_det_mask = det <= 0
+    #     if invalid_det_mask.any():
+    #         # print(f"[WARNING] Replacing {invalid_det_mask.sum().item()} invalid matrices with identity")
+    #         matrices[invalid_det_mask] = torch.eye(3, device=matrices.device, dtype=matrices.dtype)
+
+    #     # Validate matrices for non-finite values
+    #     if not torch.all(torch.isfinite(matrices)):
+    #         bad_indices = ~torch.isfinite(matrices).all(dim=(1, 2))
+    #         print("Found non-finite matrices at indices:", torch.where(bad_indices)[0])
+    #         print("Problematic matrices:", matrices[bad_indices])
+    #         print("Original 6D input for bad matrices:", rot_6d_batch[bad_indices])
+    #         raise ValueError("Non-finite values found in rotation matrices")
+
+    #     matrices_np = matrices.float().cpu().numpy()
+
+    #     # Convert to Euler angles using scipy
+    #     rot = R.from_matrix(matrices_np)
+    #     euler_zxy = rot.as_euler('zxy', degrees=True)
+    #     return euler_zxy
 
 
     def get_all_joints(self) -> List[str]:
@@ -408,7 +411,7 @@ class OffsetBVHParser:
             if rot_indices:
                 rot_euler = frame_data[rot_indices]
                 # Convert to matrix using ZXY order
-                rot_matrix = R.from_euler('zxy', [rot_euler[2], rot_euler[0], rot_euler[1]], degrees=True).as_matrix()
+                rot_matrix = R.from_euler('ZXY', [rot_euler[2], rot_euler[0], rot_euler[1]], degrees=True).as_matrix()
             else:
                 rot_matrix = np.eye(3)
             
@@ -460,7 +463,7 @@ class OffsetBVHParser:
             if rot_indices:
                 rot_euler = frame_data[rot_indices]
                 # Convert to matrix using ZXY order
-                return R.from_euler('zxy', [rot_euler[2], rot_euler[0], rot_euler[1]], degrees=True).as_matrix()
+                return R.from_euler('ZXY', [rot_euler[2], rot_euler[0], rot_euler[1]], degrees=True).as_matrix()
             else:
                 return np.eye(3)
         
@@ -473,12 +476,12 @@ class OffsetBVHParser:
         if rot_indices:
             rot_euler = frame_data[rot_indices]
             # Convert to matrix using ZXY order
-            joint_matrix = R.from_euler('zxy', [rot_euler[2], rot_euler[0], rot_euler[1]], degrees=True).as_matrix()
+            joint_matrix = R.from_euler('ZXY', [rot_euler[2], rot_euler[0], rot_euler[1]], degrees=True).as_matrix()
             return parent_matrix @ joint_matrix
         else:
             return parent_matrix
         
-    def features_to_websocket_format(self, features, frame_idx=None):
+    def features_to_websocket_format(self, features, audio_snippet=None, sample_rate=44100, frame_idx=None):
         """
         Convert BVH features to WebSocket-friendly format with quaternion rotations and bone names
         
@@ -494,10 +497,11 @@ class OffsetBVHParser:
         if frame_idx is not None:
             frames_to_process = features[0,frame_idx:frame_idx+1]
             single_frame = True
+                
         else:
             frames_to_process = features
             single_frame = False
-
+                
         result_frames = []
         
         # Get bone names for each rotation map entry
@@ -516,7 +520,7 @@ class OffsetBVHParser:
                 rot_bones.append(joint_name)
         
         # Process each frame
-        for frame_features in frames_to_process:
+        for frame_index, frame_features in enumerate(frames_to_process):
             # Use a dictionary with bone names as keys instead of an array
             frame_data = {"joints": {}}
             
@@ -552,6 +556,25 @@ class OffsetBVHParser:
                     }
                 }
             
+            if audio_snippet is not None and len(audio_snippet) > 0:
+                try:
+                    # Convert audio to proper WAV format with headers
+                    audio_buffer = io.BytesIO()
+                    sf.write(audio_buffer, audio_snippet, sample_rate, format='WAV')
+                    audio_buffer.seek(0)
+                    
+                    # Convert to base64
+                    audio_frame_base64 = base64.b64encode(audio_buffer.read()).decode('utf-8')
+                    
+                    # Add audio chunk and format info to frame data
+                    frame_data["audio_chunk"] = audio_frame_base64
+                    frame_data["audio_format"] = {
+                        "sampleRate": sample_rate,
+                        "format": "wav"
+                    }
+                except Exception as e:
+                    print(f"Error preparing audio data: {e}")
+
             result_frames.append(frame_data)
         
         # Return single frame or array of frames

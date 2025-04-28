@@ -3,7 +3,7 @@ import os
 import csv
 import pickle
 from tqdm import tqdm
-from utils.bvh_processing.bvh_converter4 import OffsetBVHParser
+from utils.bvh_processing.bvh_converter3 import OffsetBVHParser
 from utils.audio_processing.extract_audio_features import extract_audio_features
 
 class DataProcessor:

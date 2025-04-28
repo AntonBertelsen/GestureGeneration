@@ -35,6 +35,20 @@
         let websocket = null;
         let isConnected = false;
 
+        let audioContext;
+        let audioBufferQueue = [];
+        let audioSchedulerRunning = false;
+        let nextAudioPlayTime = 0;
+        let audioFrameDuration = 1/30; // For 30fps
+
+        // Add this function to initialize audio context
+        function initAudioContext() {
+            // Create audio context (with user interaction to satisfy autoplay policies)
+            audioContext = new (window.AudioContext || window.webkitAudioContext)();
+            nextAudioPlayTime = audioContext.currentTime;
+            console.log("Audio context initialized");
+        }
+
         // Add this in your bvh_viewer.html JavaScript code
         function getWebSocketPort() {
             const urlParams = new URLSearchParams(window.location.search);
@@ -54,6 +68,11 @@
                 try {
                     const frameData = JSON.parse(event.data);
                     console.log(`Received frame with ${Object.keys(frameData.joints || {}).length} joints`);
+                    
+                    // Process audio if present
+                    if (frameData.audio_chunk) {
+                        processAudioChunk(frameData.audio_chunk);
+                    }
                     
                     frameBuffer.push(frameData);
                     // Limit buffer size to prevent memory issues
@@ -103,14 +122,13 @@
         controls.enablePan = false; // Disable moving the camera
         controls.target.set(0, 1.0, 0); // Set the target to the model's height
 
-        let glbModel, glbSkeleton, bvhSkeleton, animationMixer, bvhData, bvhClip, animAction;
+        let glbModel, bvhSkeleton, animationMixer, bvhData, bvhClip, animAction;
 
         // Load both GLB and BVH in parallel
         const glbLoad = new Promise((resolve, reject) => {
             const gltfLoader = new GLTFLoader();
             gltfLoader.load('model.glb', (gltf) => {
                 glbModel = gltf.scene;
-                glbSkeleton = new THREE.SkeletonHelper(glbModel);
                 scene.add(glbModel);
                 resolve();
             }, undefined, reject); // On error, reject the promise
@@ -304,6 +322,84 @@
             });
         }
 
+        function processAudioChunk(audioBase64) {
+            if (!audioContext) {
+                console.warn("Audio context not initialized");
+                return;
+            }
+            
+            try {
+                // Decode base64 audio data (WAV format)
+                const binaryString = atob(audioBase64);
+                const byteArray = new Uint8Array(binaryString.length);
+                
+                for (let i = 0; i < binaryString.length; i++) {
+                    byteArray[i] = binaryString.charCodeAt(i);
+                }
+                
+                console.log("Audio data size:", byteArray.length, "bytes");
+                
+                // Convert to AudioBuffer - now using proper WAV format with headers
+                audioContext.decodeAudioData(byteArray.buffer)
+                    .then(audioBuffer => {
+                        console.log("Successfully decoded audio buffer:", 
+                                    "duration:", audioBuffer.duration, 
+                                    "channels:", audioBuffer.numberOfChannels,
+                                    "sample rate:", audioBuffer.sampleRate);
+                        
+                        // Add to our queue
+                        audioBufferQueue.push(audioBuffer);
+                        
+                        // Start audio scheduler if not already running
+                        if (!audioSchedulerRunning) {
+                            audioSchedulerRunning = true;
+                            scheduleAudioPlayback();
+                        }
+                    })
+                    .catch(err => {
+                        console.error("Error decoding audio data:", err);
+                    });
+            } catch (error) {
+                console.error("Error processing audio chunk:", error);
+            }
+        }
+
+        // Add this function to schedule audio playback
+        function scheduleAudioPlayback() {
+            // Process all available buffers that need to be played
+            while (audioBufferQueue.length > 0) {
+                const audioBuffer = audioBufferQueue.shift();
+                
+                // Create audio source
+                const source = audioContext.createBufferSource();
+                source.buffer = audioBuffer;
+                source.connect(audioContext.destination);
+                
+                // Schedule the audio to play
+                const currentTime = audioContext.currentTime;
+                
+                // If we're behind real-time, catch up
+                if (nextAudioPlayTime < currentTime) {
+                    nextAudioPlayTime = currentTime;
+                }
+                
+                // Play the audio at the scheduled time
+                source.start(nextAudioPlayTime);
+                
+                // Calculate next play time
+                nextAudioPlayTime += audioBuffer.duration;
+            }
+            
+            // Check again in a short while for new audio chunks
+            if (streamingMode) {
+                setTimeout(() => {
+                    scheduleAudioPlayback();
+                }, 10);
+            } else {
+                audioSchedulerRunning = false;
+            }
+        }
+
         animate();
 
         // Handle window resize
@@ -343,7 +439,7 @@
         const skeletonToggle = document.createElement('button');
         skeletonToggle.innerText = 'Toggle Skeleton';
         skeletonToggle.onclick = () => {
-            glbSkeleton.visible = !glbSkeleton.visible;
+            skeletonHelper.visible = !skeletonHelper.visible;
         };
         controlsContainer.appendChild(skeletonToggle);
 
@@ -387,6 +483,13 @@
                 if (bvhAction) bvhAction.paused = true;
                 playPauseButton.disabled = true;
                 timeline.disabled = true;
+                
+                // Initialize audio context on first user interaction
+                if (!audioContext) {
+                    initAudioContext();
+                } else if (audioContext.state === 'suspended') {
+                    audioContext.resume();
+                }
                 
                 if (!isConnected) {
                     connectWebSocket();
