@@ -21,9 +21,20 @@ from v1_traing_loop import train
 from v1_sliding_diffusion import Diffusion
 from torch.utils.data import DataLoader
 from dataset.dataset import *
+import argparse
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="This runs the training experiments")
+    parser.add_argument("--noising_frames", type=int, 
+                        help="the number of frames with noise - this is the inharent delay", 
+                        default=64)
+    parser.add_argument("--noise_stakkings", type=int, 
+                        help="the number of noiselevels pr frame. This multiplies the number of noise steps. " \
+                        "The final number of denoiseing steps each frame goes though is equal to stakkings x noising_frames", 
+                        default=1)
+    args = parser.parse_args()
+
     wandb.login()
 
     device = torch.device(

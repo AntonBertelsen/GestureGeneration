@@ -3,6 +3,7 @@ import torch.nn as nn
 from local_attention import transformer
 from local_attention.rotary import SinusoidalEmbeddings, apply_rotary_pos_emb
 from typing import Union
+import numpy as np
 
 from v1_sliding_diffusion import Diffusion
 from debugger import Debugger, Show
@@ -42,18 +43,42 @@ class ContinuousMotionModel(nn.Module):
 
         self.n_gesture_length = n_gesture_length
 
-        assert(self.num_of_pre_timestep_frames + self.num_of_timestep_frames + self.num_of_post_timestep_frames == self.n_gesture_length)
+        
+        try:
+            assert (self.num_of_pre_timestep_frames +
+                    self.num_of_timestep_frames +
+                    self.num_of_post_timestep_frames == self.n_gesture_length)
+        except AssertionError:
+            print("Assertion failed!")
+            print("Pre:", self.num_of_pre_timestep_frames,
+                "Timestep:", self.num_of_timestep_frames,
+                "Post:", self.num_of_post_timestep_frames,
+                "Total Expected:", self.n_gesture_length)
+            raise
         
         self.number_of_attention_heads = number_of_attention_heads
 
         # Implemetation of the DiffuseStyleGestureModel based on the paper by YoungSeng et al.
         # We instantiate all learned model layers needed below.
 
-        # Timestep: 
-        self.base_timesteps_at_time_step_stacking_levels = []
+        # We precompute the pre- and post timestep vectores - that is timestep 0 and max_number_of_time_steps * self.max_timestep_stakking_level
+        
+        # We create tensors for the timestep linear layers
+        self.timestep_0 = torch.tensor([0.0]).to(self.device) # TODO: should we send to device here or in the forward pass?
+        self.timestep_max = torch.tensor([float(self.num_of_timestep_frames * self.max_timestep_stakking_level)]).to(self.device)  # TODO: should we send to device here or in the forward pass?
+        
+        # We rescale them to be between 0 and 1 to make it easier for the MLP positional embedding to learn
+        # self.timestep_0 /= (self.num_of_timestep_frames * self.max_timestep_stakking_level)
+        # self.timestep_max /= (self.num_of_timestep_frames * self.max_timestep_stakking_level)
+
+        # Then we make the timestep vectores each of the timestep frames in the sequence - rescaling them to be between 0 and 1 # TODO: maybe
+        self.timesteps_for_frames_at_stacking_level = {}
         for time_step_stacking_level in range(self.max_timestep_stakking_level):
             timesteps = [(t + 1) * self.max_timestep_stakking_level - (time_step_stacking_level % self.max_timestep_stakking_level) for t in range(self.num_of_timestep_frames)]
-            self.base_timesteps_at_time_step_stacking_levels.append(timesteps)
+            # timesteps /= [t / (self.num_of_timestep_frames * self.max_timestep_stakking_level) for t in timesteps]
+            timesteps = torch.tensor(timesteps, dtype=torch.bfloat16).unsqueeze(-1).to(self.device) # TODO: should we send to device here or in the forward pass?
+            print("!!!! timesteps", timesteps, "shape", timesteps.shape)
+            self.timesteps_for_frames_at_stacking_level[time_step_stacking_level] = timesteps # 1 is added, since stakkings start at 1, not 0. The Stakking level multiplies the number of defusion steps each timestep undergoes, so if the stakking level is 0 - there is no diffusion steps. 
 
         # The time step encoding MLP. Our best guess is that this is actually a learned position encoding as described in Vaswani et al. 
         # Maybe it could be interesting to investigate using sinosoidal positional encoding? That would be one way to reduce the number 
@@ -178,7 +203,7 @@ class ContinuousMotionModel(nn.Module):
         self.add_hyperparameters_to_WnB_tracking({
             "relative_positional_embedding_funtion_post_local_attention": True,
         })
-            
+        
         
         encoder_layer = nn.TransformerEncoderLayer(d_model=256, nhead=8, batch_first=True)
         self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=6)
@@ -228,38 +253,30 @@ class ContinuousMotionModel(nn.Module):
 
         #       Producing a tensor of shape (bs, number_of_frames, 192)
 
-        # 1.1.2 - first make the position embedding for timestep 0 and max_number_of_time_steps + 1
+        # 1.1.2 - first we retreave the position embedding for timestep 0 and max_number_of_time_steps + 1, and 
         
-        # We create tensors for the timestep linear layers
-        timestep_0 = torch.tensor([0.0]).to(self.device)  # (bs, 1, 1)
-        timestep = torch.tensor([float(self.num_of_timestep_frames)]).to(self.device)  # (bs, 1, 1)
-        
-        timestep_0_pos_embedding = self.time_step_mlp(timestep_0)  # (bs, 1, 1) -> (bs, 1, 64)
-        timestep_max_pos_embedding = self.time_step_mlp(timestep)  # (bs, 1, 1) -> (bs, 1, 64)
-
-        # We rescale them to be between 0 and 1 to make it easier for the MLP positional embedding to learn
-        timestep_0_pos_embedding /= (self.num_of_timestep_frames * self.max_timestep_stakking_level)
-        timestep_max_pos_embedding /= (self.num_of_timestep_frames * self.max_timestep_stakking_level)
-
-        self.debugger.capture(("timestep_0_pos_embedding", timestep_0_pos_embedding), [Show.MAX_MIN, Show.IMAGE], 
-            keys=["timestep_0_pos_embedding", "timesteps_pos_embedding"])
-        self.debugger.capture(("timestep_max_pos_embedding", timestep_max_pos_embedding), [Show.MAX_MIN, Show.IMAGE], 
-            keys=["timestep_max_pos_embedding", "timesteps_pos_embedding"])
 
         # 1.1.3 - Then we make the positional embedding each of the timestep frames in the sequence
 
         t_for_each_timestep_frame = torch.arange(float(self.num_of_timestep_frames)).unsqueeze(-1).to(self.device)  # (bs, t_for_each_timestep_frame, 1)
-        # TODO: tjeck if this works with bs dim
 
-        self.debugger.capture(("t_for_each_timestep_frame", t_for_each_timestep_frame), [Show.MAX_MIN, Show.IMAGE],
-            keys=["t_for_each_timestep_frame", "timesteps_pos_embedding"])
 
-        # We need to rescale the t_for_each_timestep_frame to be between 0 and 1
-        t_for_each_timestep_frame /= (self.num_of_timestep_frames * self.max_timestep_stakking_level)
+        # For the post de-noising stpes
+        timestep_0_pos_embedding = self.time_step_mlp(self.timestep_0)  # (bs, 1, 1) -> (bs, 1, 64)
+        
+        # For the pre de-noising stpes
+        timestep_max_pos_embedding = self.time_step_mlp(self.timestep_max)  # (bs, 1, 1) -> (bs, 1, 64)
+        
+        # For the de-nosing steps
+        print("!!!!, current_time_step_stacking_level: ", current_time_step_stacking_level)
+        timesteps_for_frames = self.timesteps_for_frames_at_stacking_level[current_time_step_stacking_level]  # (bs, t_for_each_timestep_frame, 1) -> (bs, t_for_each_timestep_frame, 1)
+        print("!!!!, current_time_step_stacking_level: ", current_time_step_stacking_level,"  timesteps_for_frames IN THE FORWARD PASS: ", timesteps_for_frames, " shape: ", timesteps_for_frames.shape)
+        t_with_pos_embedding_for_each_timestep_frame = self.time_step_mlp(
+            timesteps_for_frames
+        )  # (bs, t_for_each_timestep_frame, 64)
 
-        t_with_pos_embedding_for_each_timestep_frame = self.time_step_mlp(t_for_each_timestep_frame)  # (bs, t_for_each_timestep_frame, 192)
-
-        self.debugger.capture(("t_with_pos_embedding_for_each_timestep_frame - should be (t_for_each_timestep_frame, 192)", t_with_pos_embedding_for_each_timestep_frame), [Show.MAX_MIN, Show.IMAGE],
+        self.debugger.capture(("t_with_pos_embedding_for_each_timestep_frame - should be (t_for_each_timestep_frame, 192)", t_with_pos_embedding_for_each_timestep_frame), 
+            [Show.MAX_MIN, Show.IMAGE, Show.SHAPE],
             keys=["t_with_pos_embedding_for_each_timestep_frame", "timesteps_pos_embedding"])
 
 
@@ -269,7 +286,7 @@ class ContinuousMotionModel(nn.Module):
         
         style = self.style_linear(one_hot_style)
 
-        self.debugger.capture(("style after style_linear", style), [Show.MAX_MIN, Show.IMAGE], keys="style")
+        self.debugger.capture(("style after style_linear", style), [Show.MAX_MIN, Show.IMAGE, Show.SHAPE], keys="style")
 
         # 1.2.2 - Mask the style if apply_random_mask_to_style is True
         style_mask = torch.bernoulli(torch.full_like(style, 1 - condition_mask_probabilty))

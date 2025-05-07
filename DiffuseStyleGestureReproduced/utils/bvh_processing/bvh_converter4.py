@@ -32,6 +32,8 @@ class OffsetBVHParser:
         # Extraction/insertion mappings
         self._pos_extraction_map = []  # [(output_idx, input_idx)] for positions
         self._rot_extraction_map = []  # [(output_start_idx, [x_idx, y_idx, z_idx])] for rotations
+
+        self.bone_to_indices_map = {}  # Maps bone names to their indices in the BVH file. Note that a bone can have multiple indices if it has multiple channels.
         
         # Parse the file
         self._parse_bvh()
@@ -165,14 +167,22 @@ class OffsetBVHParser:
             
             # Handle body_world: extract positions only
             if joint_name == 'body_world':
-                for idx in self.joint_position_indices[joint_name]:
-                    self._pos_extraction_map.append((output_idx, idx))
-                    output_idx += 1
+                self._pos_extraction_map.append((output_idx, self.joint_position_indices[joint_name]))
+                self.bone_to_indices_map[joint_name] = [output_idx, 
+                                                         output_idx + 1, 
+                                                         output_idx + 2]
+                output_idx += 3
             
             # For non-body_world joints, extract rotations
             if joint_name != 'body_world' and len(self.joint_rotation_indices[joint_name]) == 3:
                 # Each rotation group is mapped to 6 output values (6D representation)
                 self._rot_extraction_map.append((output_idx, self.joint_rotation_indices[joint_name]))
+                self.bone_to_indices_map[joint_name] = [output_idx, 
+                                                         output_idx + 1, 
+                                                         output_idx + 2, 
+                                                         output_idx + 3, 
+                                                         output_idx + 4,
+                                                         output_idx + 5]
                 output_idx += 6
     
     def extract_channels(self) -> np.ndarray:
@@ -185,9 +195,10 @@ class OffsetBVHParser:
         result = np.zeros((self.num_frames, channel_count))
         
         # Extract position channels (direct copy)
-        for out_idx, in_idx in self._pos_extraction_map:
-            result[:, out_idx] = self.motion_data[:, in_idx]
-        
+        for out_idx, in_indices in self._pos_extraction_map:
+            # copy the three position channels for this joint
+            result[:, out_idx:out_idx+3] = self.motion_data[:, in_indices]
+
         # Process rotation channels in batches
         for out_start_idx, in_indices in self._rot_extraction_map:
             # Extract Euler angles for this joint for all frames at once

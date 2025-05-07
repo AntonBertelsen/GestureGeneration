@@ -5,9 +5,10 @@ import pickle
 from tqdm import tqdm
 from utils.bvh_processing.bvh_converter3 import OffsetBVHParser
 from utils.audio_processing.extract_audio_features import extract_audio_features
+import yaml
 
 class DataProcessor:
-    def __init__(self, bvh_dir, wav_dir, metadata_file, output_dir):
+    def __init__(self, bvh_dir, wav_dir, metadata_file, output_dir, skeleton_config_file):
         self.bvh_dir = bvh_dir
         self.wav_dir = wav_dir
         self.metadata_file = metadata_file
@@ -25,19 +26,24 @@ class DataProcessor:
         self.bvh_files = sorted([f for f in os.listdir(bvh_dir) if f.endswith('.bvh')])
         self.wav_files = sorted([f for f in os.listdir(wav_dir) if f.endswith('.wav')])
 
-        self.target_joints = ['body_world', 'b_root', 'b_r_foot', 'b_l_foot', 'b_l_upleg', 'b_l_leg', 'b_r_upleg', 'b_r_leg', 
-                'b_spine0', 'b_spine1', 'b_spine2', 'b_spine3', 'b_l_shoulder', 'b_l_arm', 'b_l_arm_twist', 
-                'b_l_forearm', 'b_l_wrist_twist', 'b_l_wrist', 'b_l_pinky1', 'b_l_pinky2', 'b_l_pinky3', 'b_l_ring1', 
-                'b_l_ring2', 'b_l_ring3', 'b_l_middle1', 'b_l_middle2', 'b_l_middle3', 'b_l_index1', 'b_l_index2', 
-                'b_l_index3', 'b_l_thumb0', 'b_l_thumb1', 'b_l_thumb2', 'b_l_thumb3', 'b_r_shoulder', 'b_r_arm', 
-                'b_r_arm_twist', 'b_r_forearm', 'b_r_wrist_twist', 'b_r_wrist', 'b_r_thumb0', 'b_r_thumb1', 
-                'b_r_thumb2', 'b_r_thumb3', 'b_r_pinky1', 'b_r_pinky2', 'b_r_pinky3', 'b_r_middle1', 'b_r_middle2', 
-                'b_r_middle3', 'b_r_ring1', 'b_r_ring2', 'b_r_ring3', 'b_r_index1', 'b_r_index2', 'b_r_index3', 
-                'b_neck0', 'b_head']
+        # Load skeleton configuration
+        self.skeleton_config = self._load_skeleton_config(skeleton_config_file)
+
+        self.target_joints = self.skeleton_config['target_joints']
+        self.bone_categories = self.skeleton_config['categories']
         
         # Skeleton info cache
         self.skeleton_info = None
-        
+    
+    def _load_skeleton_config(self, skeleton_config_file):
+        """Load skeleton configuration from YAML file"""
+        try:
+            with open(skeleton_config_file, 'r') as f:
+                config = yaml.safe_load(f)
+            return config
+        except Exception as e:
+            raise RuntimeError(f"Error loading skeleton config: {e}")
+
     def _load_metadata(self):
         """Load metadata from CSV file"""
         metadata = {}
@@ -85,7 +91,10 @@ class DataProcessor:
                     'joint_names': parser.get_all_joints(),
                     'joint_channels': parser.joint_channels,
                     'joint_parents': parser.joint_parent,
-                    'joint_offsets': parser.joint_offsets
+                    'joint_offsets': parser.joint_offsets,
+                    'bone_to_indices': parser.bone_to_indices_map,
+                    'bone_categories': self.bone_categories,
+                    'number_of_features': parser.get_channel_count()
                 }
             
             # Extract audio features
@@ -100,10 +109,6 @@ class DataProcessor:
             # Convert to float16 to save space 
             bvh_features = bvh_features.astype(np.float16)
             audio_features = audio_features.astype(np.float16)
-            
-            # print if gesture contains nan
-            if np.isnan(bvh_features).any():
-                print(f"Gesture contains NaN values: {prefix}")
 
             # Save features
             np.savez_compressed(
@@ -213,7 +218,7 @@ class DataProcessor:
                 'audio_dim': audio_dim,
                 'speaker_shape': speaker_shape,
                 'file_segments': file_segments,
-                'skeleton_info': self.skeleton_info
+                'skeleton_info': self.skeleton_info,
             }
             pickle.dump(metadata, f)
         
@@ -226,7 +231,8 @@ if __name__ == "__main__":
     wav_dir = 'dataset/genea2023_dataset/trn/main-agent/wav'
     metadata_file = 'dataset/genea2023_dataset/trn/metadata.csv'
     output_dir = 'dataset/genea2023_dataset/trn/main-agent'
+    skeleton_config_file = 'dataset/genea2023_dataset/trn/skeleton_config.yaml'
     
-    processor = DataProcessor(bvh_dir, wav_dir, metadata_file, output_dir)
+    processor = DataProcessor(bvh_dir, wav_dir, metadata_file, output_dir, skeleton_config_file)
     processor.process_files()
     processor.create_consolidated_data()

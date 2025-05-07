@@ -71,9 +71,9 @@ class Debugger:
                     elif display == Show.IMAGE:
 
                         if tensor.dim() == 3:
-                            plt.imshow(tensor.permute(2,1,0)[:,:,0].cpu().detach().numpy())
+                            plt.imshow(tensor.permute(2,1,0)[:,:,0].cpu().to(torch.float32).detach().numpy())
                         elif tensor.dim() == 2:
-                            plt.imshow(tensor.permute(1, 0).cpu().detach().numpy())
+                            plt.imshow(tensor.permute(1, 0).cpu().to(torch.float32).detach().numpy())
                         
                         plt.title(tensor_name)
                         plt.show()

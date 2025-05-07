@@ -307,6 +307,7 @@ class ConsolidatedRAMDataset(Dataset):
         meta_file = consolidated_file.replace('.npz', '_meta.pkl')
         with open(meta_file, 'rb') as f:
             self.metadata = pickle.load(f)
+            self.skeleton_info = self.metadata['skeleton_info']
         
         # Load the entire dataset into RAM
         data = np.load(consolidated_file)

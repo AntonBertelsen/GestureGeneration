@@ -45,19 +45,20 @@ def acceleration_loss(pred, gt):
 def train(
         experiment_collection_name: str, # name of the gruope of experiments, this run is a part of
         debug_run: bool, # shold log to wandb or not 
-        model_checkpoint_dir: str, # dir of the model checkpoint to load from
         model,
         device,
         training_loader,
         val_loader, 
         num_epochs: int, 
+        model_checkpoint_dir: str = None, # dir of the model checkpoint to load from
         model_check_point_interval_in_epocs: int = 2, # how often to save the model checkpoint
         uplaod_model_check_point: bool = False, # should upload the model checkpoint to wandb
         condition_mask_probabilty=0.1,  # TODO: should be in model, as hyper param, not here
         lr=0.0003,
         variance_loss_weight=0.1,
         velocity_loss_weight=0.1,
-        acceleration_loss_weight=0.1):
+        acceleration_loss_weight=0.1,
+        category_weighting: dict[str, float] = {}):
 
 
     diffusion = model.deffsion_noise_scheduler
@@ -104,6 +105,9 @@ def train(
 
                 # Model hyper parameters
                 **model.get_WnB_config_specs(),
+
+                # training_loader hyper parameters
+                # **training_loader.get_WnB_config_specs(),
             }
         )
 
@@ -117,6 +121,27 @@ def train(
     # I'll later use these two sets to plot the progress of the model training.
     loss_rec = {'train' : [], 'val' : [], 'train_plot': []}
     best_loss_rec = {'train' : np.inf, 'val' : np.inf}
+
+    # Skeleton data used to weight bones differently in the loss function
+    # Initialize a tensor of zeros with the same length as the number of bones
+    skeleton_info = training_loader.dataset.skeleton_info
+    num_features = skeleton_info['number_of_features']
+    bone_index_weighted_by_category_vector = torch.ones(num_features)
+
+    # Assign weights based on the categories
+    for category, weight in category_weighting.items():
+        # Check if the category exists in the skeleton info
+        if category not in skeleton_info['bone_categories']:
+            print(f"Warning!!! Category '{category}' not found in skeleton info. Skipping.")
+            continue
+        for bone_name in skeleton_info['bone_categories'][category]:
+            bone_indices = skeleton_info['bone_to_indices'][bone_name]
+            # Check if bone exists in the skeleton info
+            if bone_indices is None:
+                print(f"Warning!!! Bone '{bone_name}' not found in skeleton info. Skipping.")
+                continue
+            for index in bone_indices:
+                bone_index_weighted_by_category_vector[index] = weight
     
     # This is the main training loop that goes through the entire dataset and trains the model on it for each epoch.
     for epoch in range(num_epochs):
@@ -186,7 +211,7 @@ def train(
             with autocast(device_type=device.type, dtype=torch.bfloat16):
                 # Convert all inputs to same precision as autocast context
                 output = model(
-                    current_time_step_stacking_level = time_step_stakking_level,
+                    current_time_step_stacking_level = time_step_stakking_level.item(),
                     one_hot_style = main_agent_id_one_hot,
                     audio_features = audio_features, 
                     noisy_gesture_sequence = noisy_gesture_sequence,
@@ -199,7 +224,14 @@ def train(
             loss_start = time.time()
             with autocast(device_type=device.type, dtype=torch.bfloat16):
                 # Use the casted target for all loss calculations
-                loss = loss_f(output, gesture_sequence) 
+                loss = nn.HuberLoss(reduction="none")(output, gesture_sequence)
+                print(f"Loss shape before weighting: {loss.shape}")
+                # Applying the bone category weighting
+                loss = bone_index_weighted_by_category_vector * loss
+                # Now we find the mean over the batch and time dimensions
+                print(f"Loss shape after weighting: {loss.shape}")
+                loss = loss.mean()
+                print(f"Loss shape after meaning: {loss.shape}")
                 loss += variance_loss(output, gesture_sequence) * variance_loss_weight 
                 loss += velocity_loss(output, gesture_sequence) * velocity_loss_weight 
                 loss += acceleration_loss(output, gesture_sequence) * acceleration_loss_weight
@@ -219,17 +251,12 @@ def train(
             # if loss.item() < best_loss_rec['train']:
             #     best_loss_rec['train'] = loss.item()
 
-            #     # Saveing the model checkpoint
-            #     if epoch >= next_checkpount_epoch == 0 and not debug_run:
-            #         next_checkpount_epoch += model_check_point_interval_in_epocs
-            #         checkpoint_path = f"{model_checkpoint_dir}/{current_model_name}/{current_model_name}_epoch_{epoch}.pth"
-            #         torch.save(model.state_dict(), checkpoint_path)
-            #         print(f"Model checkpoint saved at {checkpoint_path} under the name {checkpoint_path} at loss: {loss.item()}")
-            # 
-            #         if uplaod_model_check_point:
-            #             artifact = wandb.Artifact('current_model_name', type='model')
-            #             artifact.add_file('model.pth')
-            #             wandb.log_artifact(artifact)
+            # Saveing the model checkpoint
+            if epoch >= next_checkpount_epoch == 0 and model_checkpoint_dir is not None:
+                next_checkpount_epoch += model_check_point_interval_in_epocs
+                checkpoint_path = f"{model_checkpoint_dir}/{current_model_name}/{current_model_name}_epoch_{epoch}.pth"
+                torch.save(model.state_dict(), checkpoint_path)
+                print(f"Model checkpoint saved at {checkpoint_path} under the name {checkpoint_path} at loss: {loss.item()}")
 
             # Backward pass time
             backward_start = time.time()
