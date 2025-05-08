@@ -258,24 +258,38 @@ class ContinuousMotionModel(nn.Module):
 
         # 1.1.3 - Then we make the positional embedding each of the timestep frames in the sequence
 
-        t_for_each_timestep_frame = torch.arange(float(self.num_of_timestep_frames)).unsqueeze(-1).to(self.device)  # (bs, t_for_each_timestep_frame, 1)
+        # t_for_each_timestep_frame = torch.arange(float(self.num_of_timestep_frames)).unsqueeze(-1).to(self.device)  # (bs, t_for_each_timestep_frame, 1)
 
 
         # For the post de-noising stpes
-        timestep_0_pos_embedding = self.time_step_mlp(self.timestep_0)  # (bs, 1, 1) -> (bs, 1, 64)
+        # We divide the timestep by the max number of time steps, to make it easier for the MLP to learn
+        # This gives values between 0 and 1, which is what the MLP is trained on.
+        timestep_0_pos_embedding = self.time_step_mlp(self.timestep_0 / self.timestep_max)  # (bs, 1, 1) -> (bs, 1, 64)
         
         # For the pre de-noising stpes
-        timestep_max_pos_embedding = self.time_step_mlp(self.timestep_max)  # (bs, 1, 1) -> (bs, 1, 64)
+        # We divide the timestep by the max number of time steps, to make it easier for the MLP to learn
+        # This gives values between 0 and 1, which is what the MLP is trained on.
+        timestep_max_pos_embedding = self.time_step_mlp(self.timestep_max / self.timestep_max)  # (bs, 1, 1) -> (bs, 1, 64)
         
         # For the de-nosing steps
-        print("!!!!, current_time_step_stacking_level: ", current_time_step_stacking_level)
+        # print("!!!!, current_time_step_stacking_level: ", current_time_step_stacking_level)
         timesteps_for_frames = self.timesteps_for_frames_at_stacking_level[current_time_step_stacking_level]  # (bs, t_for_each_timestep_frame, 1) -> (bs, t_for_each_timestep_frame, 1)
-        print("!!!!, current_time_step_stacking_level: ", current_time_step_stacking_level,"  timesteps_for_frames IN THE FORWARD PASS: ", timesteps_for_frames, " shape: ", timesteps_for_frames.shape)
+        # print("!!!!, current_time_step_stacking_level: ", current_time_step_stacking_level,"  timesteps_for_frames IN THE FORWARD PASS: ", timesteps_for_frames, " shape: ", timesteps_for_frames.shape)
         t_with_pos_embedding_for_each_timestep_frame = self.time_step_mlp(
-            timesteps_for_frames
+            timesteps_for_frames / self.timestep_max
         )  # (bs, t_for_each_timestep_frame, 64)
 
-        self.debugger.capture(("t_with_pos_embedding_for_each_timestep_frame - should be (t_for_each_timestep_frame, 192)", t_with_pos_embedding_for_each_timestep_frame), 
+        # print(f"!!!! timestep_0_pos_embedding values: {timestep_0_pos_embedding}, shape: {timestep_0_pos_embedding.shape}")
+        print(f"!!!! timestep_0 values {self.timestep_max}")
+        print(f"!!!! timestep_0 values after normaliszating: {self.timestep_max / self.timestep_max}")
+        # print(f"!!!! timestep_max_pos_embedding values: {timestep_max_pos_embedding}, shape: {timestep_max_pos_embedding.shape}")
+        print(f"!!!! timestep_0 values {self.timestep_0 / self.timestep_max}")
+        print(f"!!!! timestep_0 values after normaliszating: {self.timestep_0 / self.timestep_max}")
+        # print(f"!!!! t_with_pos_embedding_for_each_timestep_frame values: {t_with_pos_embedding_for_each_timestep_frame}, shape: {t_with_pos_embedding_for_each_timestep_frame.shape}")
+        # print(f"!!!! timesteps values: {timesteps_for_frames}")
+        print(f"!!!! timesteps values after normaliszating: {timesteps_for_frames / self.timestep_max}")
+
+        self.debugger.capture(("t_with_pos_embedding_for_each_timestep_frame", t_with_pos_embedding_for_each_timestep_frame), 
             [Show.MAX_MIN, Show.IMAGE, Show.SHAPE],
             keys=["t_with_pos_embedding_for_each_timestep_frame", "timesteps_pos_embedding"])
 
@@ -283,6 +297,8 @@ class ContinuousMotionModel(nn.Module):
         # 1.2 - Prepare the style tensor
 
         # 1.2.1 - Apply a linear layer to get a tensor of shape (bs, 1, 64)
+
+        self.debugger.capture(("one_hot_style BEFORE style_linear", one_hot_style), [Show.MAX_MIN, Show.IMAGE, Show.SHAPE], keys="style")
         
         style = self.style_linear(one_hot_style)
 
@@ -303,7 +319,7 @@ class ContinuousMotionModel(nn.Module):
         pre_timesteps_style_vectors = style_plus_t_0_pos_embedding.unsqueeze(1).expand(style_plus_t_0_pos_embedding.shape[0], self.num_of_pre_timestep_frames, style_plus_t_0_pos_embedding.shape[1])
         post_timesteps_style_vectors = style_plus_t_max_pos_embedding.unsqueeze(1).expand(style_plus_t_max_pos_embedding.shape[0], self.num_of_post_timestep_frames, style_plus_t_max_pos_embedding.shape[1])
 
-        style_plus_t_for_each_timestep_frame = t_for_each_timestep_frame + style.unsqueeze(1).expand(style.shape[0], self.num_of_timestep_frames, style.shape[1])
+        style_plus_t_for_each_timestep_frame = t_with_pos_embedding_for_each_timestep_frame + style.unsqueeze(1).expand(style.shape[0], self.num_of_timestep_frames, style.shape[1])
 
         self.debugger.capture([("style_plus_t_0_pos_embedding", style_plus_t_0_pos_embedding), 
                                ("style_plus_t_max_pos_embedding", style_plus_t_max_pos_embedding),

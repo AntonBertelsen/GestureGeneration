@@ -252,11 +252,11 @@ def train(
             #     best_loss_rec['train'] = loss.item()
 
             # Saveing the model checkpoint
-            if epoch >= next_checkpount_epoch == 0 and model_checkpoint_dir is not None:
-                next_checkpount_epoch += model_check_point_interval_in_epocs
-                checkpoint_path = f"{model_checkpoint_dir}/{current_model_name}/{current_model_name}_epoch_{epoch}.pth"
-                torch.save(model.state_dict(), checkpoint_path)
-                print(f"Model checkpoint saved at {checkpoint_path} under the name {checkpoint_path} at loss: {loss.item()}")
+            # if epoch >= next_checkpount_epoch == 0 and model_checkpoint_dir is not None:
+            #     next_checkpount_epoch += model_check_point_interval_in_epocs
+            #     checkpoint_path = f"{model_checkpoint_dir}/{current_model_name}/{current_model_name}_epoch_{epoch}.pth"
+            #     torch.save(model.state_dict(), checkpoint_path)
+            #     print(f"Model checkpoint saved at {checkpoint_path} under the name {checkpoint_path} at loss: {loss.item()}")
 
             # Backward pass time
             backward_start = time.time()
