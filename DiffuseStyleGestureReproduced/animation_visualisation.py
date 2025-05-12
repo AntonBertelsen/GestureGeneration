@@ -163,7 +163,7 @@ def init_visualization():
         print(f"WebSocket Server: ws://localhost:{state['websocket_port']}")
 
         # Display the viewer
-        html_file_path = f"http://localhost:{state['http_server_port']}/bvh_tests/bvh_visualisation/bvh_viewer_4.html?wsport={state['websocket_port']}"
+        html_file_path = f"http://localhost:{state['http_server_port']}/bvh_tests/bvh_visualisation/bvh_viewer_5.html?wsport={state['websocket_port']}"
         print(f"Viewer URL: {html_file_path}")
         iframe_html = f'<iframe src="{html_file_path}" width="512" height="512" frameborder="0"></iframe><br>'
         display(HTML(iframe_html))
@@ -190,7 +190,7 @@ def init_visualization():
     time.sleep(1)
     
     # Display the viewer
-    html_file_path = f"http://localhost:{state['http_server_port']}/bvh_tests/bvh_visualisation/bvh_viewer_4.html?wsport={state['websocket_port']}"
+    html_file_path = f"http://localhost:{state['http_server_port']}/bvh_tests/bvh_visualisation/bvh_viewer_5.html?wsport={state['websocket_port']}"
     iframe_html = f'<iframe src="{html_file_path}" width="512" height="512" frameborder="0"></iframe><br>'
     display(HTML(iframe_html))
     

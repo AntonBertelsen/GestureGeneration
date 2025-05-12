@@ -348,14 +348,13 @@ class ConsolidatedRAMDataset(Dataset):
         return valid_points
     
     def _reshuffle(self):
-        """Generate new batch indices for the epoch"""
-        self.batch_starts = []
+        """Generate new batch indices for the epoch, optimized for speed"""
+        # Generate all indices at once: shape = (epoch_length * batch_size,)
+        all_indices = np.random.choice(self.valid_starts, self.epoch_length * self.batch_size, replace=True)
         
-        # For each batch
-        for _ in range(self.epoch_length):
-            # Random starting points for each item in the batch
-            batch_indices = np.random.choice(self.valid_starts, self.batch_size, replace=True)
-            self.batch_starts.append(batch_indices)
+        # Reshape into (epoch_length, batch_size)
+        self.batch_starts = all_indices.reshape(self.epoch_length, self.batch_size)
+
     
     def reshuffle(self):
         """Public method to reshuffle data between epochs"""
@@ -404,7 +403,7 @@ class ConsolidatedRAMDataset(Dataset):
                 speaker_batch[i] = self.speakers[segment_idx]
 
         # z-score normalization
-        gesture_batch = (gesture_batch - self.mean_pose) / self.std_pose / 10.0
-        seed_batch = (seed_batch - self.mean_pose) / self.std_pose / 10.0
+        gesture_batch = (gesture_batch - self.mean_pose) / self.std_pose
+        seed_batch = (seed_batch - self.mean_pose) / self.std_pose
 
         return gesture_batch, seed_batch, audio_batch, speaker_batch

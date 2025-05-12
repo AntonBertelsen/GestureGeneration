@@ -273,13 +273,29 @@
         function processStreamedFrames(currentTime) {
             if (frameBuffer.length === 0) return;
             
+            // Only process at 30fps
+            if (currentTime - lastFrameTime >= 1/30) {
+                // Skip to most recent frame
+                while (frameBuffer.length > 1) {
+                    frameBuffer.shift();
+                }
+                
+                const frameData = frameBuffer.shift();
+                applyFrameToSkeleton(frameData);
+                lastFrameTime = currentTime;
+            }
+        }
+
+        /*function processStreamedFrames(currentTime) {
+            if (frameBuffer.length === 0) return;
+            
             // Get the next frame if it's time to display it
             if (currentTime - lastFrameTime >= 1/30) { // Assuming 30fps stream
                 lastFrameTime = currentTime;
                 const frameData = frameBuffer.shift();
                 applyFrameToSkeleton(frameData);
             }
-        }
+        }*/
 
         function applyFrameToSkeleton(frameData) {
             // Check if we have valid joint data

@@ -1,80 +1,246 @@
 import numpy as np
 import os
 import csv
-from utils.bvh_processing.bvh_converter import BVHConverter
+import pickle
+from tqdm import tqdm
+from utils.bvh_processing.bvh_converter import OffsetBVHParser
 from utils.audio_processing.extract_audio_features import extract_audio_features
+import yaml
+import argparse
 
-bvh_dir = 'dataset/genea2023_dataset/trn/main-agent/bvh'
-wav_dir = 'dataset/genea2023_dataset/trn/main-agent/wav'
-metadata_file = 'dataset/genea2023_dataset/trn/metadata.csv'
+class DataProcessor:
+    def __init__(self, bvh_dir, wav_dir, metadata_file, output_dir, skeleton_config_file):
+        self.bvh_dir = bvh_dir
+        self.wav_dir = wav_dir
+        self.metadata_file = metadata_file
+        self.output_dir = output_dir
+        self.features_dir = os.path.join(output_dir, "features")
+        
+        # Ensure the directory exists and is writable
+        try:
+            os.makedirs(self.features_dir, exist_ok=True)
+        except PermissionError as e:
+            raise PermissionError(f"Unable to create directory '{self.features_dir}'. Check permissions.") from e
+        
+        # Load metadata and files
+        self.metadata = self._load_metadata()
+        self.bvh_files = sorted([f for f in os.listdir(bvh_dir) if f.endswith('.bvh')])
+        self.wav_files = sorted([f for f in os.listdir(wav_dir) if f.endswith('.wav')])
 
+        # Load skeleton configuration
+        self.skeleton_config = self._load_skeleton_config(skeleton_config_file)
 
-# Find all the bvh files in the dataset directory for the main agent
-bvh_files = sorted(os.listdir(bvh_dir))
-wav_files = sorted(os.listdir(wav_dir))
-
-# The bvh converter is an object because some information needs to be retained between conversions to and from features. 
-# One reason is that not all bones are present in the features, so when we convert back, we need to add them back. This information is kept track off by
-# the bvh converter.
-bvh_converter = BVHConverter()
-
-# Load the csv metadata file
-metadata = {}
-with open(metadata_file, 'r') as f:
-    reader = csv.DictReader(f)
-    metadata = {row['prefix']: row for row in reader}
-
-# Find number of speakers in the dataset
-speakers = set()
-for key in metadata:
-    speakers.add(metadata[key]['main-agent_id'])
-    speakers.add(metadata[key]['interloctr_id'])
-num_speakers = len(speakers)
-
-# I want to find the average pose of the dataset to store positions relative to this pose
-print("Calculating average pose")
-avg_pose = bvh_converter.calculate_average_pose(bvh_files, bvh_dir)
-print("Done calculating average pose!")
-
-print("Extracting features")
-
-# Now I want to loop over each file pair and extract the joint angles from the bvh file and the audio features from the wav file
-for bvh_file, wav_file in zip(bvh_files, wav_files):
-    print(bvh_file, wav_file)
-
-    prefix = os.path.splitext(bvh_file)[0].removesuffix("_main-agent")  # Adjust if necessary
-
-    file_metadata = metadata.get(prefix, {})
+        self.target_joints = self.skeleton_config['target_joints']
+        self.bone_categories = self.skeleton_config['categories']
+        
+        # Skeleton info cache
+        self.skeleton_info = None
     
-    # extract metadata features prefix,main-agent_id,main-agent_has_fingers,interloctr_id,interloctr_has_fingers
-    prefix = file_metadata.get('prefix', prefix)
-    main_agent_id = file_metadata.get('main-agent_id', '0')
-    main_agent_has_fingers = file_metadata.get('main-agent_has_fingers', '0')
-    interloctr_id = file_metadata.get('interloctr_id', '0')
-    interloctr_has_fingers = file_metadata.get('interloctr_has_fingers', '0')
+    def _load_skeleton_config(self, skeleton_config_file):
+        """Load skeleton configuration from YAML file"""
+        try:
+            with open(skeleton_config_file, 'r') as f:
+                config = yaml.safe_load(f)
+            return config
+        except Exception as e:
+            raise RuntimeError(f"Error loading skeleton config: {e}")
 
-    # agent id should be one-hot encoded in a vector
-    main_agent_id_one_hot = np.zeros(num_speakers)
-    main_agent_id_one_hot[int(main_agent_id) - 1] = 1
-    interloctr_id_one_hot = np.zeros(num_speakers)
-    interloctr_id_one_hot[int(interloctr_id) - 1] = 1
+    def _load_metadata(self):
+        """Load metadata from CSV file"""
+        metadata = {}
+        with open(self.metadata_file, 'r') as f:
+            reader = csv.DictReader(f)
+            metadata = {row['prefix']: row for row in reader}
+        
+        # Calculate num_speakers
+        self.num_speakers = 0
+        for key in metadata:
+            self.num_speakers = max(self.num_speakers, int(metadata[key]['main-agent_id']))
+            self.num_speakers = max(self.num_speakers, int(metadata[key]['interloctr_id']))
+        
+        return metadata
+    
+    def process_files(self):
+        """Process all BVH and WAV files to extract features"""
+        print(f"Processing {len(self.bvh_files)} BVH+WAV file pairs...")
+        
+        # Process each file pair
+        for bvh_file, wav_file in tqdm(list(zip(self.bvh_files, self.wav_files)), desc="Extracting features"):
+            prefix = os.path.splitext(bvh_file)[0].removesuffix("_main-agent")
+            
+            # Get metadata for this file
+            file_metadata = self.metadata.get(prefix, {})
+            main_agent_id = file_metadata.get('main-agent_id', '0')
+            main_agent_has_fingers = file_metadata.get('main-agent_has_fingers', '0')
+            interloctr_id = file_metadata.get('interloctr_id', '0')
+            interloctr_has_fingers = file_metadata.get('interloctr_has_fingers', '0')
+            
+            # One-hot encode speaker IDs
+            main_agent_id_one_hot = np.zeros(self.num_speakers, dtype=np.float16)
+            main_agent_id_one_hot[int(main_agent_id) - 1] = 1
+            interloctr_id_one_hot = np.zeros(self.num_speakers, dtype=np.float16)
+            interloctr_id_one_hot[int(interloctr_id) - 1] = 1
+            
+            # Extract BVH features using OffsetBVHParser
+            bvh_path = os.path.join(self.bvh_dir, bvh_file)
+            parser = OffsetBVHParser(bvh_path, target_joints=self.target_joints)
+            bvh_features = parser.extract_channels()
+            
+            # Cache skeleton info from first file
+            if self.skeleton_info is None:
+                self.skeleton_info = {
+                    'joint_names': parser.get_all_joints(),
+                    'joint_channels': parser.joint_channels,
+                    'joint_parents': parser.joint_parent,
+                    'joint_offsets': parser.joint_offsets,
+                    'bone_to_indices': parser.bone_to_indices_map,
+                    'bone_categories': self.bone_categories,
+                    'number_of_features': parser.get_channel_count()
+                }
+            
+            # Extract audio features
+            wav_path = os.path.join(self.wav_dir, wav_file)
+            audio_features = extract_audio_features(wav_path).numpy()
+            
+            # Crop to minimum length
+            min_length = min(bvh_features.shape[0], audio_features.shape[0])
+            bvh_features = bvh_features[:min_length]
+            audio_features = audio_features[:min_length]
+            
+            # Convert to float16 to save space 
+            bvh_features = bvh_features.astype(np.float16)
+            audio_features = audio_features.astype(np.float16)
 
-    # Extract joint angles from the bvh file
-    bvh_features = bvh_converter.to_features(os.path.join(bvh_dir, bvh_file), avg_pose)
+            # Save features
+            np.savez_compressed(
+                os.path.join(self.features_dir, f"{prefix}.npz"),
+                bvh_features=bvh_features,
+                audio_features=audio_features,
+                prefix=prefix,
+                main_agent_id_one_hot=main_agent_id_one_hot,
+                main_agent_has_fingers=main_agent_has_fingers,
+                interloctr_id_one_hot=interloctr_id_one_hot,
+                interloctr_has_fingers=interloctr_has_fingers
+            )
+    
+    def create_consolidated_data(self):
+        """Create a single contiguous data file from all features"""
+        print("Creating consolidated data file...")
+        output_file = os.path.join(self.output_dir, "consolidated.npz")
+        
+        # Find all NPZ files
+        feature_files = sorted([os.path.join(self.features_dir, f) 
+                               for f in os.listdir(self.features_dir) 
+                               if f.endswith('.npz')])
+        
+        if not feature_files:
+            print("No feature files found!")
+            return
+            
+        # Process first file to get dimensions
+        with np.load(feature_files[0]) as npz:
+            gesture_dim = npz["bvh_features"].shape[1]
+            audio_dim = npz["audio_features"].shape[1]
+            speaker_shape = npz["main_agent_id_one_hot"].shape
+        
+        # First pass: calculate total frames and collect metadata
+        total_frames = 0
+        file_segments = []
+        speaker_data = []
+        
+        for file_path in tqdm(feature_files, desc="Analyzing files"):
+            with np.load(file_path) as npz:
+                frames = len(npz["bvh_features"])
+                
+                if frames > 0:
+                    file_segments.append({
+                        'file': os.path.basename(file_path),
+                        'start_idx': total_frames,
+                        'end_idx': total_frames + frames,
+                        'frames': frames
+                    })
+                    
+                    speaker_data.append(np.array(npz["main_agent_id_one_hot"]))
+                    total_frames += frames
+        
+        print(f"Total frames: {total_frames}")
+        print(f"Gesture dim: {gesture_dim}")
+        print(f"Audio dim: {audio_dim}")
+        print(f"Speaker shape: {speaker_shape}")
+        
+        # Create consolidated arrays
+        gestures = np.zeros((total_frames, gesture_dim), dtype=np.float16)
+        audio = np.zeros((total_frames, audio_dim), dtype=np.float16)
+        
+        # Second pass: fill the arrays
+        for segment in tqdm(file_segments, desc="Consolidating data"):
+            file_path = os.path.join(self.features_dir, segment['file'])
+            start = segment['start_idx']
+            end = segment['end_idx']
+            
+            with np.load(file_path) as npz:
+                frames = segment['frames']
+                gestures[start:end] = npz["bvh_features"][:frames]
+                audio[start:end] = npz["audio_features"][:frames]
+        
+        # Calculate statistics
+        print("Computing statistics...")
+        mean_pose = np.mean(gestures.astype(np.float64), axis=0)
+        std_pose = np.std(gestures.astype(np.float64), axis=0)
 
-    # Extract audio features from the wav file
-    audio_features = extract_audio_features(os.path.join(wav_dir, wav_file))
+        # replace any near-zero values in std with 1.0 to avoid division by zero
+        # Using np.isclose() to handle floating point precision issues
+        zero_mask = np.isclose(std_pose, 0.0, atol=1e-8)
+        std_pose[zero_mask] = 1.0
+        
+        # Save consolidated data
+        print(f"Saving consolidated data to {output_file}")
+        np.savez_compressed(
+            output_file,
+            gestures=gestures,
+            audio=audio,
+            speakers=np.array(speaker_data),
+            mean_pose=mean_pose,
+            std_pose=std_pose
+        )
+        # Also save mean and std separately
+        np.savez_compressed(
+            os.path.join(self.output_dir, "statistics.npz"),
+            mean_pose=mean_pose,
+            std_pose=std_pose
+        )
+        
+        # Save metadata separately
+        meta_file = os.path.join(self.output_dir, "consolidated_meta.pkl")
+        with open(meta_file, 'wb') as f:
+            metadata = {
+                'total_frames': total_frames,
+                'gesture_dim': gesture_dim,
+                'audio_dim': audio_dim,
+                'speaker_shape': speaker_shape,
+                'file_segments': file_segments,
+                'skeleton_info': self.skeleton_info,
+            }
+            pickle.dump(metadata, f)
+        
+        print(f"Consolidated data created successfully!")
+        print(f"File size: {os.path.getsize(output_file) / (1024**3):.2f} GB")
 
-    # make features directory if it does not exist
-    os.makedirs('dataset/genea2023_dataset/trn/main-agent/features', exist_ok=True)
+# Main execution
+if __name__ == "__main__":
 
-    # Construct a npz file with the features
-    np.savez_compressed(f'dataset/genea2023_dataset/trn/main-agent/features/{prefix}.npz', 
-                        bvh_features=bvh_features, 
-                        audio_features=audio_features, 
-                        prefix=prefix, 
-                        main_agent_id_one_hot=main_agent_id_one_hot, 
-                        main_agent_has_fingers=main_agent_has_fingers, 
-                        interloctr_id_one_hot=interloctr_id_one_hot, 
-                        interloctr_has_fingers=interloctr_has_fingers
-                        )
+    parser = argparse.ArgumentParser(description="Process and consolidate dataset.")
+    parser.add_argument("--dataset_type", choices=["trn", "toy", "test"], default="trn", help="Specify the dataset type to use: 'trn', 'toy', or 'test'. Default is 'trn'.")
+    args = parser.parse_args()
+
+    dataset_type = args.dataset_type
+    base_dir = f'dataset/genea2023_dataset/{dataset_type}/main-agent'
+    bvh_dir = os.path.join(base_dir, 'bvh')
+    wav_dir = os.path.join(base_dir, 'wav')
+    metadata_file = f'dataset/genea2023_dataset/{dataset_type}/metadata.csv'
+    output_dir = base_dir
+    skeleton_config_file = f'dataset/genea2023_dataset/skeleton_config.yaml'
+    
+    processor = DataProcessor(bvh_dir, wav_dir, metadata_file, output_dir, skeleton_config_file)
+    processor.process_files()
+    processor.create_consolidated_data()
