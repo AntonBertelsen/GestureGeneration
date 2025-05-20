@@ -37,14 +37,15 @@ def encoded_latent_space_loss(pred, gt):
     return torch.mean((pred - gt) ** 2)
 
 def train(
-        experiment_collection_name: str, # name of the gruope of experiments, this run is a part of
-        debug_run: bool, # shold log to wandb or not 
-        model,
+        experiment_collection_name: str, # Name of the gruope of experiments, this run is a part ofmodel, 
         device,
+        model,
         training_loader,
         val_loader, 
-        num_epochs: int,
+        num_epochs: int, 
         autoencoder_model = None,
+        run = None, # A wandb.run object to log the training process
+        wandb_config: dict = None, # A wandb.config from a yml or dict. This is logged hyper parameters for wandb used for hyperparameter tuning / sweeps. Given to be attached to the run, and extended with given, but not sweeping hyperparams
         model_checkpoint_dir: str = None, # dir of the model checkpoint to load from
         model_check_point_interval_in_epochs: int = 2, # how often to save the model checkpoint
         upload_model_check_point: bool = False, # should upload the model checkpoint to wandb
@@ -69,40 +70,27 @@ def train(
 
     torch.set_float32_matmul_precision('high')
     
-    # initialise a wandb (weighs and biases) run tracker
-    run = None
-    step = 0
-    if not debug_run:
-        run = wandb.init(
-            project="v1_sliding_diffusion", 
-            group=experiment_collection_name,
-            name=current_model_name,
-            entity="", # W&B username or team, when its empty, it will use the default team
-            config={
-                # Training hyper parameters
-                "epochs": num_epochs,
-                "batch_size": training_loader.batch_size,
-                "learning_rate": lr,
-                "optimizer": optimizer.__class__.__name__,
-                "variance_loss_weight": variance_loss_weight,
-                "velocity_loss_weight": velocity_loss_weight,
-                "acceleration_loss_weight": acceleration_loss_weight,
+    if wandb_config is not None:
+        wandb_config.update({
+            # Training hyper parameters
+            "batch_size": training_loader.batch_size,
+            "epochs": num_epochs,
+            "optimizer": optimizer.__class__.__name__,
+            "velocity_loss_weight": velocity_loss_weight,
+            "acceleration_loss_weight": acceleration_loss_weight,
 
-                # Data hyper params:
-                # TODO: add hyper parameters for the dataset, using the get_WnB_config_specs(), implementing the WnBTrackable ABC class
-                "dataloader": "RAMResidentDataset",
-                "float_precision_or_type": "Halvs",
+            # Data hyper params:
+            "dataloader": "RAMResidentDataset",
+            "float_precision_or_type": "Halvs",
 
-                # Noising hyper parameters
-                **diffusion.get_WnB_config_specs(),
+            # Noising hyper parameters
+            **model.deffsion_noise_scheduler.get_WnB_config_specs(),
 
-                # Model hyper parameters
-                **model.get_WnB_config_specs(),
+            # training_loader hyper parameters
+            **model.get_WnB_config_specs(),
+        }, allow_val_change=True)  # <- Important: allows adding/updating keys
 
-                # training_loader hyper parameters
-                # **training_loader.get_WnB_config_specs(),
-            }
-        )
+
 
     # I then move the model to the device that is being used and put in traning mode
     model = model.to(device)
@@ -284,7 +272,7 @@ def train(
                 
                 # log the loss to wandb (W&B)
                 step = i + epoch * len(training_loader)
-                if not debug_run: run.log({"train/loss": loss.item()}, step=step)
+                if run is not None: run.log({"train/loss": loss.item()}, step=step)
                 
                 clear_output(wait=True)
                 visualisation_start = time.time()
@@ -383,7 +371,7 @@ def train(
                 axs[0,4].text(0.02, 0.98, profiling_text, transform=axs[0,4].transAxes, 
                             verticalalignment='top', bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
                 
-                # if not debug_run: run.log({"train/predoction_illutration": wandb.Image(plt.gcf())}, step=step) # Log the figure to W&B
+                if run is not None: run.log({"train/predoction_illutration": wandb.Image(plt.gcf())}, step=step) # Log the figure to W&B
                 plt.show()
 
                 visualisation_time = time.time() - visualisation_start
@@ -473,13 +461,6 @@ def train(
         model.train()
 
     # When all of the epochs are over, the entire list of training loss and validation loss are returned.
-    if not debug_run: run.finish() # close the wandb (W&B) run
-    return model
+    if run is not None: run.finish() # close the wandb (W&B) run
+    return model # loss_rec['train'] #, loss_rec['val']
 
-
-def RunTypes(Enum):
-    EXPERIMENT = "EXPERIMENT"
-    DEBUG = "DEBUG"
-
-def init_wandb_experiment_tracker(project_name, run_type, run_name, model):
-    pass
