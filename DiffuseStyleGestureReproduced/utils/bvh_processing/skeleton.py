@@ -1,0 +1,444 @@
+import numpy as np
+import torch
+from typing import List, Dict, Optional, Tuple, Set, Union
+from scipy.spatial.transform import Rotation as R
+import base64
+import io
+import soundfile as sf
+
+class Skeleton:
+    def __init__(self):
+        # Joint structure
+        self.joints = []  # List of joints in order of appearance
+        self.joint_channels = {}  # Dict mapping joint name to channel names (What channels are defined in the bvh for this joint, i.e. position, rotation)
+        self.joint_position_indices = {}  # Maps joint name to position channel indices
+        self.joint_rotation_indices = {}  # Maps joint name to rotation channel indices
+        self.joint_offsets = {}  # Maps joint name to its offset
+        self.joint_parent = {}  # Maps joint name to its parent's name
+        self.end_sites = {}  # Maps joint name to end site offset
+        self.target_joints = None  # Set of joints to extract, if None all joints are used
+        
+        # Extraction/insertion mappings
+        self._pos_extraction_map = []  # [(output_idx, input_idx)] for positions
+        self._rot_extraction_map = []  # [(output_start_idx, [x_idx, y_idx, z_idx])] for rotations
+        self.bone_to_indices_map = {}  # Maps bone names to their indices in the output array
+
+        # Bone categories (Used for loss weights)
+        self.bone_categories = {}
+
+        self.mean_pose = None  # Mean pose for normalization
+        self.std_pose = None  # Standard deviation for normalization
+
+        # The world position mean and std are used to normalize the world positions which are used as a regularisation term in the loss function and also used for calculating FGD.
+        # I feel a little weird about normalising the world positions, since to me it seems like part of the idea of world positions is that bones that move a lot are punished more / more important.
+        # But this is what is done in https://github.com/genea-workshop/genea_numerical_evaluations/tree/2022 as far as I can tell.
+        self.world_pos_mean_pose = None  # Mean pose for world positions 
+        self.world_pos_std_pose = None  # Standard deviation for world positions
+
+        self.device = torch.device('cpu')  # Default device
+    
+    def set_device(self, device: torch.device) -> None:
+        """Set the device for tensor operations."""
+        self.device = device
+        self.mean_pose = self.mean_pose.to(device) if self.mean_pose is not None else None
+        self.std_pose = self.std_pose.to(device) if self.std_pose is not None else None
+        self.world_pos_mean_pose = self.world_pos_mean_pose.to(device) if self.world_pos_mean_pose is not None else None
+        self.world_pos_std_pose = self.world_pos_std_pose.to(device) if self.world_pos_std_pose is not None else None
+
+    def set_mean_std(self, mean_pose: np.ndarray, std_pose: np.ndarray, world_pos_mean_pose: np.ndarray = None, world_Pos_mean_std: np.ndarray = None) -> None:
+        """Set the mean and standard deviation for normalization."""
+        self.mean_pose = torch.tensor(mean_pose, dtype=torch.float32, device=self.device)
+        self.std_pose = torch.tensor(std_pose, dtype=torch.float32, device=self.device)
+        if world_pos_mean_pose is not None and world_Pos_mean_std is not None:
+            self.world_pos_mean_pose = torch.tensor(world_pos_mean_pose, dtype=torch.float32, device=self.device)
+            self.world_pos_std_pose = torch.tensor(world_Pos_mean_std, dtype=torch.float32, device=self.device)
+
+    def add_joint(self, joint_name: str, parent_name: Optional[str] = None) -> None:
+        """Add a joint to the skeleton."""
+        self.joints.append(joint_name)
+        self.joint_channels[joint_name] = []
+        self.joint_position_indices[joint_name] = []
+        self.joint_rotation_indices[joint_name] = []
+        self.joint_parent[joint_name] = parent_name
+    
+    def set_joint_offset(self, joint_name: str, offset: List[float]) -> None:
+        """Set joint offset."""
+        self.joint_offsets[joint_name] = offset
+    
+    def add_end_site(self, parent_name: str, offset: List[float]) -> None:
+        """Add an end site to a joint."""
+        end_site_name = f"EndSite_{parent_name}"
+        self.end_sites[end_site_name] = offset
+    
+    def set_joint_channels(self, joint_name: str, channels: List[str], 
+                          channel_start_idx: int) -> None:
+        """Set the channels for a joint."""
+        self.joint_channels[joint_name] = channels
+        
+        # Track position and rotation channel indices
+        for j, channel in enumerate(channels):
+            if 'position' in channel:
+                self.joint_position_indices[joint_name].append(channel_start_idx + j)
+            elif 'rotation' in channel:
+                self.joint_rotation_indices[joint_name].append(channel_start_idx + j)
+    
+    def set_target_joints(self, target_joints: Optional[List[str]]) -> None:
+        """Set the target joints for extraction."""
+        self.target_joints = target_joints
+        self._precompute_mappings()
+
+    def set_bone_categories(self, bone_categories: Dict[str, str]) -> None:
+        """Set the bone categories for loss weights."""
+        self.bone_categories = bone_categories
+    
+    def _precompute_mappings(self) -> None:
+        """Precompute mappings for fast extraction/insertion."""
+        # Reset mappings
+        self._pos_extraction_map = []
+        self._rot_extraction_map = []
+        
+        output_idx = 0
+        
+        # Process each joint
+        for joint_name in self.joints:
+            # Skip if not in target joints
+            if self.target_joints is not None and joint_name not in self.target_joints:
+                continue
+            
+            # Handle body_world: extract positions only
+            if joint_name == 'body_world':
+                self._pos_extraction_map.append((output_idx, self.joint_position_indices[joint_name]))
+                self.bone_to_indices_map[joint_name] = [output_idx, 
+                                                       output_idx + 1, 
+                                                       output_idx + 2]
+                output_idx += 3
+            
+            # For non-body_world joints, extract rotations
+            if joint_name != 'body_world' and len(self.joint_rotation_indices[joint_name]) == 3:
+                # Each rotation group is mapped to 6 output values (6D representation)
+                self._rot_extraction_map.append((output_idx, self.joint_rotation_indices[joint_name]))
+                self.bone_to_indices_map[joint_name] = [output_idx, 
+                                                       output_idx + 1, 
+                                                       output_idx + 2, 
+                                                       output_idx + 3, 
+                                                       output_idx + 4,
+                                                       output_idx + 5]
+                output_idx += 6
+    
+    def get_channel_count(self) -> int:
+        """Get the number of channels in the extracted data."""
+        count = 0
+        
+        for joint_name in self.joints:
+            if self.target_joints is not None and joint_name not in self.target_joints:
+                continue
+                
+            if joint_name == 'body_world':
+                # Count position channels
+                count += len(self.joint_position_indices[joint_name])
+            else:
+                # Each rotation becomes 6 values
+                if len(self.joint_rotation_indices[joint_name]) == 3:
+                    count += 6
+        
+        return count
+    
+    def _euler_to_6d_batch(self, euler_batch: np.ndarray) -> np.ndarray:
+        """Convert Euler angles to 6D rotation representation."""
+        # Create rotation objects (handles all frames at once)
+        rot = R.from_euler('ZXY', euler_batch, degrees=True)
+        
+        # Get rotation matrices
+        matrices = rot.as_matrix()  # Shape: (num_frames, 3, 3)
+        
+        # Extract first two columns and combine
+        col1 = matrices[:, :, 0]  # Shape: (num_frames, 3)
+        col2 = matrices[:, :, 1]  # Shape: (num_frames, 3)
+        
+        # Combine into 6D representation
+        return np.hstack([col1, col2])  # Shape: (num_frames, 6)
+    
+    def _6d_to_matrix(self, rot_6d_batch: torch.Tensor) -> torch.Tensor:
+        """Convert 6D rotation representation to rotation matrices."""
+        batch_size = rot_6d_batch.shape[0]
+        num_frames = rot_6d_batch.shape[1]
+        
+        # Extract columns
+        col1 = rot_6d_batch[:, :, 0:3]  # Shape: (batch_size, num_frames, 3)
+        col2 = rot_6d_batch[:, :, 3:6]  # Shape: (batch_size, num_frames, 3)
+        
+        # Normalize columns (vectorized)
+        col1_norm = torch.linalg.norm(col1, axis=2, keepdims=True)
+        col2_norm = torch.linalg.norm(col2, axis=2, keepdims=True)
+        col1 = col1 / col1_norm
+        col2 = col2 / col2_norm
+        
+        # Compute cross product for third column (vectorized)
+        col3 = torch.linalg.cross(col1, col2)
+        
+        # Stack into rotation matrices
+        matrices = torch.zeros((batch_size, num_frames, 3, 3), device=rot_6d_batch.device)
+        matrices[:, :, :, 0] = col1
+        matrices[:, :, :, 1] = col2
+        matrices[:, :, :, 2] = col3
+        
+        return matrices
+    
+    def _matrix_to_euler_batch(self, matrix_batch: torch.Tensor) -> np.ndarray:
+        """Convert rotation matrices to Euler angles."""
+        # matrix_batch is shape (batch_size, num_frames, 3, 3)
+        # Reshape to (batch_size * num_frames, 3, 3) for conversion
+        batch_size, num_frames, _, _ = matrix_batch.shape
+        
+        matrix_batch = matrix_batch.reshape(-1, 3, 3)  # Shape: (batch_size * num_frames, 3, 3)
+
+        # Convert to rotation objects
+        rot = R.from_matrix(matrix_batch)
+        
+        # Convert to Euler angles in ZXY order
+        euler_zxy = rot.as_euler('ZXY', degrees=True)
+
+        # Reshape back to (batch_size, num_frames, 3)
+        euler_zxy = euler_zxy.reshape(batch_size, num_frames, 3)
+        
+        return euler_zxy
+    
+    def _6d_to_euler_batch(self, rot_6d_batch: torch.Tensor) -> np.ndarray:
+        """Convert 6D rotation representation to Euler angles."""
+        # Convert 6D to rotation matrices
+        rot_matrices = self._6d_to_matrix(rot_6d_batch)
+        
+        # Convert to Euler angles
+        euler_angles = self._matrix_to_euler_batch(rot_matrices)
+        
+        return euler_angles
+    
+    def normalize_poses(self, pose: torch.Tensor) -> torch.Tensor:
+        """Normalize the pose using mean and std."""
+        if self.mean_pose is not None and self.std_pose is not None:
+            return (pose - self.mean_pose) / self.std_pose
+        return pose
+    
+    def denormalize_poses(self, pose: torch.Tensor) -> torch.Tensor:
+        """Denormalize the pose using mean and std."""
+        if self.mean_pose is not None and self.std_pose is not None:
+            return pose * self.std_pose + self.mean_pose
+        return pose
+    
+    def normalize_world_positions(self, world_positions: torch.Tensor) -> torch.Tensor:
+        """Normalize the world positions using mean and std."""
+        if self.world_pos_mean_pose is not None and self.world_pos_std_pose is not None:
+            return (world_positions - self.world_pos_mean_pose) / self.world_pos_std_pose
+        return world_positions
+    
+    def denormalize_world_positions(self, world_positions: torch.Tensor) -> torch.Tensor:
+        """Denormalize the world positions using mean and std."""
+        if self.world_pos_mean_pose is not None and self.world_pos_std_pose is not None:
+            return world_positions * self.world_pos_std_pose + self.world_pos_mean_pose
+        return world_positions
+    
+    def calculate_world_positions(self, frame_data: torch.Tensor) -> torch.Tensor:
+        """Calculate world positions using forward kinematics."""
+
+        # Check if the input is a npy array or a torch tensor (The data proccessing pipeline uses npy arrays)
+        if isinstance(frame_data, np.ndarray):
+            frame_data = torch.tensor(frame_data, dtype=torch.float32, device=self.device)
+
+        # Check if there is a batch dimension
+        has_batch_dim = len(frame_data.shape) == 3
+        if not has_batch_dim:
+            # Add batch dimension
+            frame_data = frame_data.unsqueeze(0)
+
+        batch_size, num_frames, _ = frame_data.shape
+        
+        # Dictionary to store world positions
+        world_positions = {}
+        
+        # Dictionary to store world rotations (as matrices)
+        world_rotations = {}
+        
+        # Get root position
+        for joint_name in self.joints:
+            if joint_name == 'body_world' and joint_name in self.bone_to_indices_map:
+                root_idx = self.bone_to_indices_map[joint_name][0]
+                # Extract the root position for all batches and frames
+                root_pos = frame_data[:, :, root_idx:root_idx+3]
+                world_positions[joint_name] = root_pos
+                # Root has identity rotation by default
+                identity = torch.eye(3, device=frame_data.device)
+                world_rotations[joint_name] = identity.repeat(batch_size, num_frames, 1, 1)
+                break
+        
+        # Process joints in hierarchy order
+        processed = {'body_world'}
+        
+        while len(processed) < len(self.joints):
+            for joint_name in self.joints:
+                # Skip if already processed
+                if joint_name in processed:
+                    continue
+                
+                # Process joint if its parent has been processed
+                parent_name = self.joint_parent.get(joint_name)
+
+                if parent_name in processed:
+                    # Get parent world rotation and position
+                    parent_rot = world_rotations[parent_name]  # shape: (batch_size, num_frames, 3, 3)
+                    parent_pos = world_positions[parent_name]  # shape: (batch_size, num_frames, 3)
+
+                    # Get joint offset and expand for all batches and frames
+                    offset = torch.tensor(self.joint_offsets.get(joint_name, [0, 0, 0]), 
+                                          device=frame_data.device)
+                    offset = offset.view(1, 1, 3).expand(batch_size, num_frames, 3)
+                    
+                    # Get joint local rotation (if available)
+                    local_rot_batch = torch.eye(3, device=frame_data.device).repeat(batch_size, num_frames, 1, 1)
+                    
+                    if joint_name in self.bone_to_indices_map:
+                        rot_indices = self.bone_to_indices_map[joint_name]
+                        if len(rot_indices) == 6:  # 6D rotation
+                            start_idx = rot_indices[0]
+                            # Extract 6D rotation for all batches and frames
+                            rot_6d = frame_data[:, :, start_idx:start_idx+6]
+                            flat_matrices = self._6d_to_matrix(rot_6d)
+                            # Reshape back to batch dimensions
+                            local_rot_batch = flat_matrices
+                    
+                    # Calculate world rotation
+                    world_rot = torch.matmul(parent_rot, local_rot_batch)
+                    world_rotations[joint_name] = world_rot
+                    
+                    # Calculate world position: parent_pos + (parent_rot * offset)
+                    # Need to reshape for proper broadcasting in matmul
+                    rotated_offset = torch.matmul(
+                        parent_rot, 
+                        offset.unsqueeze(-1)
+                    ).squeeze(-1)
+                    
+                    world_pos = parent_pos + rotated_offset
+                    world_positions[joint_name] = world_pos
+                    
+                    # Mark as processed
+                    processed.add(joint_name)
+        
+        # Compile a tensor of target joint world positions
+        target_joint_names = self.target_joints if self.target_joints else self.joints
+        world_positions_tensor = torch.zeros((batch_size, num_frames, len(target_joint_names), 3), device=frame_data.device)
+        
+        for i, joint_name in enumerate(target_joint_names):
+            if joint_name in world_positions:
+                world_positions_tensor[:, :, i, :] = world_positions[joint_name]
+        
+        flattened_world_positions = world_positions_tensor.reshape(world_positions_tensor.shape[0], world_positions_tensor.shape[1], -1) # shape: (batch_size, num_frames, 3 * num_joints)
+        
+        if not has_batch_dim:
+            # Remove batch dimension if it was added
+            flattened_world_positions = flattened_world_positions.squeeze(0)
+
+        return flattened_world_positions
+
+    def features_to_websocket_format(self, features, audio_snippet=None, sample_rate=44100, frame_idx=None, debug_positions=None):
+        # Handle single frame or batch
+        if frame_idx is not None:
+            frames_to_process = features[0,frame_idx:frame_idx+1]
+            single_frame = True
+                
+        else:
+            frames_to_process = features
+            single_frame = False
+                
+        result_frames = []
+        
+        # Get bone names for each rotation map entry
+        bone_names = []
+        if self.target_joints and 'body_world' in self.target_joints:
+            bone_names.append('body_world')  # Root
+        
+        # Get list of rotation bones in order
+        rot_bones = []
+        for joint_name in self.joints:
+            if joint_name == 'body_world':
+                continue  # Already handled
+            if self.target_joints is not None and joint_name not in self.target_joints:
+                continue
+            if len(self.joint_rotation_indices.get(joint_name, [])) == 3:
+                rot_bones.append(joint_name)
+        
+        # Process each frame
+        for frame_index, frame_features in enumerate(frames_to_process):
+            # Use a dictionary with bone names as keys instead of an array
+            frame_data = {"joints": {}}
+            
+            # Process root position (first 3 values if present)
+            if len(self._pos_extraction_map) > 0:
+                frame_data["joints"]["body_world"] = {
+                    "position": {
+                        "x": float(frame_features[0]),
+                        "y": float(frame_features[1]),
+                        "z": float(frame_features[2])
+                    },
+                    # Default identity quaternion for root if not rotated
+                    "eulerAngles": {"x": 0.0, "y": 0.0, "z": 0.0}
+                }
+            
+            # Process each joint's rotation
+            for i, (out_start_idx, _) in enumerate(self._rot_extraction_map):
+                # Get bone name for this rotation
+                bone_name = rot_bones[i] if i < len(rot_bones) else f"bone_{i}"
+                    
+                # Get the 6D rotation representation
+                rot_6d = frame_features[out_start_idx:out_start_idx+6].reshape(1,1,6)
+                
+                # Convert 6D representation to Euler angles
+                euler_angles = self._6d_to_euler_batch(rot_6d)[0,0]
+                
+                # Add both quaternion and Euler angles to the frame data
+                frame_data["joints"][bone_name] = {
+                    "eulerAngles": {
+                        "x": float(euler_angles[1]),  # X is second in ZXY order
+                        "y": float(euler_angles[2]),  # Y is third
+                        "z": float(euler_angles[0])   # Z is first
+                    }
+                }
+            
+            if audio_snippet is not None and len(audio_snippet) > 0:
+                try:
+                    # Convert audio to proper WAV format with headers
+                    audio_buffer = io.BytesIO()
+                    sf.write(audio_buffer, audio_snippet, sample_rate, format='WAV')
+                    audio_buffer.seek(0)
+                    
+                    # Convert to base64
+                    audio_frame_base64 = base64.b64encode(audio_buffer.read()).decode('utf-8')
+                    
+                    # Add audio chunk and format info to frame data
+                    frame_data["audio_chunk"] = audio_frame_base64
+                    frame_data["audio_format"] = {
+                        "sampleRate": sample_rate,
+                        "format": "wav"
+                    }
+                except Exception as e:
+                    print(f"Error preparing audio data: {e}")
+
+            if debug_positions is not None:
+                # Positions is a list of positions that should be displayed as spheres
+                # in the 3D viewer.
+                frame_positions = debug_positions[frame_index, :, :].cpu().numpy()
+                frame_data["debug_positions"] = []
+                # pos is a tensor of shape (num_frames, num_joints, 3)
+                for pos_index in range(frame_positions.shape[0]):
+                    pos = frame_positions[pos_index, :]
+                    frame_data["debug_positions"].append({
+                        "name": f"position_{pos_index}",
+                        "position": {
+                            "x": float(pos[0]),
+                            "y": float(pos[1]),
+                            "z": float(pos[2])
+                        }
+                    })
+
+            result_frames.append(frame_data)
+        
+        # Return single frame or array of frames
+        return result_frames[0] if single_frame else result_frames

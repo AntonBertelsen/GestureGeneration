@@ -14,17 +14,17 @@ class Diffusion(WnBTrackable):
                  num_of_timestep_frames: int, 
                  num_of_post_timestep_frames: int,
                  noise_schedule: tuple[Callable[[int, int], float], dict[str, Union[str, int, float, bool]]],
-                 num_of_timestap_stackings: int = 1,):
+                 num_of_timestep_stackings: int = 1,):
         
         # OBS: 
-        # number of deffusion steps for each frame is definded by num_of_timestep_frames * num_of_timestap_stackings
+        # number of deffusion steps for each frame is definded by num_of_timestep_frames * num_of_timestep_stackings
 
 
         self.device = device
         self.num_of_pre_timestep_frames = num_of_pre_timestep_frames
         self.num_of_timestep_frames = num_of_timestep_frames
         self.num_of_post_timestep_frames = num_of_post_timestep_frames
-        self.num_of_timestap_stackings = num_of_timestap_stackings
+        self.num_of_timestep_stackings = num_of_timestep_stackings
 
         # This is the noise schedule function that will be used to add noise at diffrent levels, given a timestamp, and a max number of timestpes.
         self.noise_schedule: Callable[[int, int], float] = noise_schedule[0]
@@ -43,11 +43,11 @@ class Diffusion(WnBTrackable):
         # To this when there is stacking of 3
         # [1, 4, ...], [2, 5, ...], [3, 6, ...]
         self.time_step_stackings: list[tuple[torch.tensor, torch.tensor]] = []
-        for time_step_stacking_index in range(num_of_timestap_stackings):
+        for time_step_stacking_index in range(num_of_timestep_stackings):
             # Precalculate all beta values - accoring to the coresponing to time_step_stacking_index aka the stacking step.
             self.beta_values = torch.tensor(
                 [self.noise_schedule(
-                    (t + 1) * num_of_timestap_stackings - (time_step_stacking_index % num_of_timestap_stackings), 
+                    (t + 1) * num_of_timestep_stackings - (time_step_stacking_index % num_of_timestep_stackings), 
                     self.num_of_timestep_frames) for t in range(self.num_of_timestep_frames)]
             )
             self.beta_values.to(self.device)
@@ -82,14 +82,14 @@ class Diffusion(WnBTrackable):
             self.time_step_stackings.append((self.sqrt_alpha_hats, self.sqrt_one_minus_alpha_hats))
 
 
-        print("self.time_step_stackings", self.time_step_stackings)
+        # print("self.time_step_stackings", self.time_step_stackings)
 
         
 
 
-    def forward(self, seqence_tensor: torch.Tensor, stacking_step = 0) -> torch.Tensor:
+    def forward(self, sequence_tensor: torch.Tensor, stacking_step = 0) -> torch.Tensor:
 
-        assert(0 <= stacking_step <= self.num_of_timestap_stackings), "Stacking step is out of range. Must be less than or equal to num_of_timestap_stackings"
+        assert(0 <= stacking_step <= self.num_of_timestep_stackings), "Stacking step is out of range. Must be less than or equal to num_of_timestep_stackings"
 
         # 1 - We use the provided noise schedule funtion to get the intensity (?) of the noise at the current time step.
         #     This is a value between 0 and 1, and determine the amount of noise to add to the 'image'.
@@ -99,7 +99,7 @@ class Diffusion(WnBTrackable):
         
         # 2 - We generate a tensor of noise with the same shape as the the 'image' tensor
         #     In torch.randn_like each elements are from a Gaussian distribution by default.
-        noise = torch.randn_like(seqence_tensor)
+        noise = torch.randn_like(sequence_tensor)
 
         # 3 - We use the same device as the 'image' tensor for this noice tensor
         noise = noise.to(self.device)
@@ -126,7 +126,7 @@ class Diffusion(WnBTrackable):
         self.sqrt_alpha_hats = self.time_step_stackings[stacking_step][0]
         self.sqrt_one_minus_alpha_hats = self.time_step_stackings[stacking_step][1]
 
-        if len(seqence_tensor.shape) == 3:
+        if len(sequence_tensor.shape) == 3:
             # If the input is a 3D tensor, we need to add a batch dimension
             self.sqrt_alpha_hats = self.sqrt_alpha_hats.unsqueeze(1)
             self.sqrt_one_minus_alpha_hats = self.sqrt_one_minus_alpha_hats.unsqueeze(1)
@@ -136,7 +136,7 @@ class Diffusion(WnBTrackable):
         # print("AFTER sqrt_alpha_hats", self.sqrt_alpha_hats.shape, self.sqrt_alpha_hats)
         # print("AFTER sqrt_one_minus_alpha_hats", self.sqrt_one_minus_alpha_hats.shape, self.sqrt_one_minus_alpha_hats)
 
-        noised_image = self.sqrt_alpha_hats * seqence_tensor + self.sqrt_one_minus_alpha_hats * noise
+        noised_image = self.sqrt_alpha_hats * sequence_tensor + self.sqrt_one_minus_alpha_hats * noise
 
         # print("noised_image", noised_image.shape, noised_image)
         
@@ -214,7 +214,7 @@ class Diffusion(WnBTrackable):
             "num_of_pre_timestep_frames": self.num_of_pre_timestep_frames,
             "num_of_timestep_frames": self.num_of_timestep_frames,
             "num_of_post_timestep_frames": self.num_of_post_timestep_frames,
-            "num_of_timestap_stackings": self.num_of_timestap_stackings,
-            "number_of_deffusion_steps_for_each_frame": self.num_of_timestep_frames * self.num_of_timestap_stackings,
+            "num_of_timestep_stackings": self.num_of_timestep_stackings,
+            "number_of_deffusion_steps_for_each_frame": self.num_of_timestep_frames * self.num_of_timestep_stackings,
             **self.noise_schedule_hyper_params,
         }

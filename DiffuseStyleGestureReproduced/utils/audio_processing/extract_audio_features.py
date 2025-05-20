@@ -35,44 +35,39 @@ def extract_audio_features(audio_file):
 
     # Extract features
     mel_spec, mfcc, rms_energy, pitch, energy_derivatives, pitch_derivatives, onsets = extract_simple_features(waveform, sample_rate, device)
-    wavlm_features = extract_wavlm_features(waveform, device)
-
-    # normalize the features
-    mel_spec = F.layer_norm(mel_spec, mel_spec.shape)
-    mfcc = F.layer_norm(mfcc, mfcc.shape)
-    rms_energy = F.layer_norm(rms_energy, rms_energy.shape)
-    pitch = F.layer_norm(pitch, pitch.shape)
-    energy_derivatives = F.layer_norm(energy_derivatives, energy_derivatives.shape)
-    pitch_derivatives = F.layer_norm(pitch_derivatives, pitch_derivatives.shape)
-    wavlm_features = F.layer_norm(wavlm_features, wavlm_features.shape)
+    # wavlm_features = extract_wavlm_features(waveform, device)
 
     # Because the features are not exactly the same length, we need to crop them to the same length. This is a little sketchy, but I think it should be fine
     # It is only 1 or 2 frames differnece typically.
 
     # Find the minimum length of the features
-    min_length = min(mel_spec.shape[1], mfcc.shape[1], rms_energy.shape[0], pitch.shape[0], wavlm_features.shape[0])
+    # min_length = min(mel_spec.shape[0], mfcc.shape[0], rms_energy.shape[0], pitch.shape[0], wavlm_features.shape[0])
+    min_length = min(mel_spec.shape[0], mfcc.shape[0], rms_energy.shape[0], pitch.shape[0])
 
     # Crop the features to the minimum length
-    mel_spec = mel_spec[:, :min_length]
-    mfcc = mfcc[:, :min_length]
-    rms_energy = rms_energy[:min_length]
-    energy_derivatives = energy_derivatives[:min_length]
-    pitch = pitch[:min_length]
-    pitch_derivatives = pitch_derivatives[:min_length]
-    wavlm_features = wavlm_features[:min_length]
+    mel_spec = mel_spec[:min_length, :]
+    mfcc = mfcc[:min_length, :]
+    rms_energy = rms_energy[:min_length, :]
+    energy_derivatives = energy_derivatives[:min_length, :]
+    pitch = pitch[:min_length, :]
+    pitch_derivatives = pitch_derivatives[:min_length, :]
+    onsets = onsets[:min_length, :]
+    # wavlm_features = wavlm_features[:min_length, :]
 
     # Concatenate features along the feature dimension
-    audio_features = torch.cat([
-        mel_spec.T,  # Transpose to match the shape (time_steps, features)
-        mfcc.T,
-        rms_energy.unsqueeze(1),  # Add a dimension to match the shape (time_steps, 1)
-        energy_derivatives.unsqueeze(1),
-        pitch.unsqueeze(1),  # Add a dimension to match the shape (time_steps, 1)
-        pitch_derivatives.unsqueeze(1),
-        wavlm_features
-    ], dim=1)
+    # audio_features = torch.cat([
+    #     mel_spec,
+    #     mfcc,
+    #     rms_energy,
+    #     energy_derivatives,
+    #     pitch,
+    #     pitch_derivatives,
+    #     onsets,
+    #     wavlm_features
+    # ], dim=1)
     
-    return audio_features.cpu()
+    # return mel_spec, mfcc, rms_energy, pitch, energy_derivatives, pitch_derivatives, onsets, wavlm_features
+    return mel_spec, mfcc, rms_energy, pitch, energy_derivatives, pitch_derivatives, onsets
 
 
 def extract_simple_features(waveform, sample_rate, device):
@@ -83,7 +78,13 @@ def extract_simple_features(waveform, sample_rate, device):
     # The hop length is the number of samples that we move forward each time we calculate the feature.
     hop_length = int(math.floor(sample_rate / 30)) # = 512
 
-    mel_spec_transform = MelSpectrogram(sample_rate=sample_rate, n_fft=frame_length, hop_length=hop_length, n_mels=16).to(device)
+    mel_spec_transform = MelSpectrogram(
+        sample_rate=sample_rate, 
+        n_fft=frame_length, 
+        hop_length=hop_length, 
+        n_mels=16,
+        power=1.0
+    ).to(device)
 
     mfcc_transform = MFCC(
         sample_rate=sample_rate, 
@@ -94,14 +95,21 @@ def extract_simple_features(waveform, sample_rate, device):
     energy_transform = RMS(frame_length=frame_length, hop_length=hop_length).to(device)
     pitch_transform = Pitch(sample_rate=sample_rate, frame_length=frame_length, hop_length=hop_length).to(device)
 
-    mel_spec = mel_spec_transform(waveform).squeeze(0)
-    mfcc = mfcc_transform(waveform).squeeze(0)
+    mel_spec = mel_spec_transform(waveform).squeeze(0).permute(1, 0)
+    mfcc = mfcc_transform(waveform).squeeze(0).permute(1, 0)
     rms_energy = energy_transform(waveform).squeeze(0)
     pitch = pitch_transform(waveform).squeeze(0)
+
 
     # Derivative features. This is used by the orignal implementation, although they never mention it in the paper.
     energy_derivatives = torch.cat([torch.zeros(1).to(device), torch.diff(rms_energy)])
     pitch_derivatives = torch.cat([torch.zeros(1).to(device), torch.diff(pitch)])
+
+    # Add feature dimensions to match the shape (time_steps, 1)
+    rms_energy = rms_energy.unsqueeze(1)
+    pitch = pitch.unsqueeze(1)
+    energy_derivatives = energy_derivatives.unsqueeze(1)
+    pitch_derivatives = pitch_derivatives.unsqueeze(1)
 
     # Onsets
     # I am not sure this is a good way to detect onsets. It would be good to look into this more, maybe compare it with librosa onset detection to validate it.

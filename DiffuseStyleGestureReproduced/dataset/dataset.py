@@ -3,121 +3,288 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 import random
+import pickle
 
-class AnimationDataset(Dataset):
-    def __init__(self, folder, seq_length=5, fps=30):
-        """
-        Args:
-            folder (str): Path to folder containing .npz files.
-            seq_length (int): Duration (in seconds) of the clip to load.
-            fps (int): Frames per second in the animation.
-        """
-        self.folder = folder
+class RAMDataset(Dataset):
+    """Dataset that loads consolidated data into RAM and extracts windows on-the-fly"""
+    def __init__(self, consolidated_file, seq_length=150, seed_length=8, 
+                 batch_size=32, epoch_length=1000, return_audio_frame_index=False):
         self.seq_length = seq_length
-        self.fps = fps
-        self.chunk_size = seq_length * fps  # number of frames per clip
+        self.seed_length = seed_length
+        self.batch_size = batch_size
+        self.epoch_length = epoch_length
+        self.chunk_size = seq_length + seed_length
+        self.return_audio_frame_index = return_audio_frame_index
         
-        # List all npz files
-        self.files = [os.path.join(folder, f) for f in os.listdir(folder) if f.endswith('.npz')]
+        # Load metadata
+        meta_file = consolidated_file.replace('.npz', '_meta.pkl')
+        with open(meta_file, 'rb') as f:
+            self.metadata = pickle.load(f)
+            self.skeleton = self.metadata['skeleton']
+            self.mean_pose = torch.from_numpy(self.metadata['mean_pose']).half()
+            self.std_pose = torch.from_numpy(self.metadata['std_pose']).half()
         
-        # For each file, read only the shape from the 'bvh_features' array
-        # (Assumes every file has a 'bvh_features' array)
-        self.file_chunk_counts = []
-        self.cum_counts = []
-        total = 0
-        for file in self.files:
-            with np.load(file) as npz:
-                total_frames = npz["bvh_features"].shape[0]
-            # Calculate how many nonoverlapping chunks fit in the file.
-            # If a file is too short, count is 0.
-            count = max(0, (total_frames - self.chunk_size) // self.chunk_size + 1)
-            self.file_chunk_counts.append(count)
-            total += count
-            self.cum_counts.append(total)
-        self.total_chunks = total
-
-        # Build a list of global indices and shuffle them for random sampling
-        self.indices = list(range(self.total_chunks))
-        random.shuffle(self.indices)
-
-    def __len__(self):
-        return self.total_chunks
-
-    def __getitem__(self, idx):
-        # Get the global chunk index from the shuffled list
-        global_idx = self.indices[idx]
-
-        # Find which file this global index falls into using cumulative counts
-        file_idx = np.searchsorted(self.cum_counts, global_idx, side='right')
-        # Compute the index within the chosen file
-        start_in_file = global_idx - (self.cum_counts[file_idx - 1] if file_idx > 0 else 0)
-        # Compute the starting frame of the chunk
-        start_frame = start_in_file * self.chunk_size
-
-        file = self.files[file_idx]
-        with np.load(file) as npz:
-            # Slice out the 5-second chunk from both bvh_features and audio_features
-            bvh_chunk = npz["bvh_features"][start_frame : start_frame + self.chunk_size]
-            audio_chunk = npz["audio_features"][start_frame : start_frame + self.chunk_size]
-
-        # Convert to torch tensors (adjust dtype as needed)
-        sample = {
-            "bvh": torch.tensor(bvh_chunk, dtype=torch.float32),
-            "audio": torch.tensor(audio_chunk, dtype=torch.float32)
-        }
-        return sample
-
-    def on_epoch_end(self):
-        """Call this method at the end of every epoch to reshuffle the data."""
-        random.shuffle(self.indices)
-
-
-class OverlapAnimationDataset(Dataset):
-    def __init__(self, folder, seq_length_in_frames=150, seed_length_in_frames=10, epoch_length=10000):
-        self.folder = folder
-        self.seq_length_in_frames = seq_length_in_frames
-        self.seed_length_in_frames = seed_length_in_frames
-        self.chunk_size = seq_length_in_frames + seed_length_in_frames
+        # Load the entire dataset into RAM
+        data = np.load(consolidated_file)
         
-        # List all npz files
-        self.files = [os.path.join(folder, f) for f in os.listdir(folder) if f.endswith('.npz')]
+        # Convert to torch tensors for faster access
+        self.gestures = torch.from_numpy(data['gestures']).half()
+        self.audio = torch.from_numpy(data['audio']).half()
+        self.speakers = torch.from_numpy(data['speakers']).half()
         
-        # For each file, compute total frames (store this info)
-        self.frames_per_file = {}
-        for file in self.files:
-            with np.load(file, allow_pickle = True) as npz:
-                total_frames = npz["bvh_features"].shape[0]
-            # Only consider files that are long enough
-            if total_frames >= self.chunk_size:
-                self.frames_per_file[file] = total_frames
+        # Close numpy file to free file handles
+        data.close()
 
-        self.valid_files = list(self.frames_per_file.keys())
-        self.epoch_length = epoch_length  # Fixed number of samples per epoch
+        # print("Mean pose is ", self.mean_pose)
+        # print("Std pose is ", self.std_pose)
+        
+        # Generate valid starting points
+        self.valid_starts = self._find_valid_starting_points()
+        print(f"Found {len(self.valid_starts)} valid starting points for windows")
+        
+        # Pre-generate batch indices (frame start points) for the epoch
+        self._reshuffle()
+    
+    def _find_valid_starting_points(self):
+        """Find all valid window starting points (excluding boundaries between files)"""
+        valid_points = []
+        total_frames = self.metadata['total_frames']
+        
+        # Process each file segment
+        for segment in self.metadata['file_segments']:
+            # Only consider segments long enough for a window
+            if segment['frames'] >= self.chunk_size:
+                # Valid start points are from segment start to (end - chunk_size)
+                for start in range(segment['start_idx'], segment['end_idx'] - self.chunk_size + 1):
+                    valid_points.append(start)
+        
+        return valid_points
+    
+    def _reshuffle(self):
+        """Generate new batch indices for the epoch, optimized for speed"""
+        # Generate all indices at once: shape = (epoch_length * batch_size,)
+        all_indices = np.random.choice(self.valid_starts, self.epoch_length * self.batch_size, replace=True)
+        
+        # Reshape into (epoch_length, batch_size)
+        self.batch_starts = all_indices.reshape(self.epoch_length, self.batch_size)
 
+    
+    def reshuffle(self):
+        """Public method to reshuffle data between epochs"""
+        self._reshuffle()
+        print("Reshuffled dataset with new random windows")
+    
     def __len__(self):
         return self.epoch_length
-
-    def __getitem__(self, idx):
-        # Randomly select a file (each sample is independent)
-        file = random.choice(self.valid_files)
-        total_frames = self.frames_per_file[file]
-        # Choose a random start such that a chunk of self.chunk_size fits in the file.
-        start_frame = random.randint(0, total_frames - self.chunk_size)
-        
-        with np.load(file, mmap_mode='r') as npz:
-            gesture_chunk = npz["bvh_features"][start_frame + self.seed_length_in_frames : start_frame + self.chunk_size]
-            seed_chunk = npz["bvh_features"][start_frame : start_frame + self.seed_length_in_frames]
-            audio_chunk = npz["audio_features"][start_frame + self.seed_length_in_frames : start_frame + self.chunk_size]
-            speaker = npz["main_agent_id_one_hot"]
-
-        sample = {
-            "gesture": torch.tensor(gesture_chunk, dtype=torch.float32),
-            "seed": torch.tensor(seed_chunk, dtype=torch.float32),
-            "audio": torch.tensor(audio_chunk, dtype=torch.float32),
-            "speaker": speaker
-        }
-        return sample
     
+    def __getitem__(self, idx):
+        """Extract windows on-the-fly from the consolidated data"""
+        start_points = self.batch_starts[idx]
+        
+        # Pre-allocate tensors for this batch
+        gesture_batch = torch.zeros(
+            (self.batch_size, self.seq_length, self.metadata['gesture_dim']), 
+            dtype=torch.float16
+        )
+        seed_batch = torch.zeros(
+            (self.batch_size, self.seed_length, self.metadata['gesture_dim']), 
+            dtype=torch.float16
+        )
+        audio_batch = torch.zeros(
+            (self.batch_size, self.seq_length, self.metadata['audio_dim']), 
+            dtype=torch.float16
+        )
+        speaker_batch = torch.zeros(
+            (self.batch_size, self.metadata['speaker_shape'][0]), 
+            dtype=torch.float16
+        )
+        
+        # For each item in the batch
+        for i, start_frame in enumerate(start_points):
+            # Find which file segment this frame belongs to
+            segment_idx = next(
+                (idx for idx, seg in enumerate(self.metadata['file_segments']) 
+                 if seg['start_idx'] <= start_frame < seg['end_idx']), 
+                None
+            )
+            
+            if segment_idx is not None:
+                # Extract windows directly from tensors
+                seed_batch[i] = self.gestures[start_frame:start_frame + self.seed_length]
+                gesture_batch[i] = self.gestures[start_frame + self.seed_length:start_frame + self.chunk_size]
+                audio_batch[i] = self.audio[start_frame + self.seed_length:start_frame + self.chunk_size]
+                speaker_batch[i] = self.speakers[segment_idx]
+
+        # z-score normalization
+        gesture_batch = (gesture_batch - self.mean_pose) / self.std_pose
+        seed_batch = (seed_batch - self.mean_pose) / self.std_pose
+
+        if self.return_audio_frame_index:
+            # Return the start frame index for the audio snippet
+            audio_frame_indices = start_points + self.seed_length
+            return gesture_batch, seed_batch, audio_batch, speaker_batch, audio_frame_indices
+        else:
+            return gesture_batch, seed_batch, audio_batch, speaker_batch
+
+class GPUDataset(Dataset):
+    """Dataset that keeps data on GPU for maximum performance with vectorized operations"""
+    def __init__(self, consolidated_file, seq_length=150, seed_length=8, 
+                 batch_size=32, epoch_length=1000, return_audio_frame_index=False,
+                 device='cuda', use_world_pos_gesture_features=False):
+        self.seq_length = seq_length
+        self.seed_length = seed_length
+        self.batch_size = batch_size
+        self.epoch_length = epoch_length
+        self.chunk_size = seq_length + seed_length
+        self.return_audio_frame_index = return_audio_frame_index
+        self.device = device
+        self.use_world_pos_gesture_features = use_world_pos_gesture_features
+        
+        print(f"Initializing GPU-resident dataset on {device}")
+        
+        # Load metadata
+        meta_file = consolidated_file.replace('.npz', '_meta.pkl')
+        with open(meta_file, 'rb') as f:
+            self.metadata = pickle.load(f)
+            self.skeleton = self.metadata['skeleton']
+            
+            # Move normalization stats directly to GPU
+            self.mean_pose = torch.from_numpy(self.metadata['mean_pose']).half().to(device)
+            self.std_pose = torch.from_numpy(self.metadata['std_pose']).half().to(device)
+        
+        print(f"Loading data from {consolidated_file} directly to GPU...")
+        # Load the entire dataset into GPU memory
+        data = np.load(consolidated_file)
+        
+        # Convert to torch tensors and move directly to GPU
+        if use_world_pos_gesture_features:
+            self.gestures = torch.from_numpy(data['world_pos_gestures']).half().to(device)
+        else:
+            self.gestures = torch.from_numpy(data['gestures']).half().to(device)
+
+        self.audio = torch.from_numpy(data['audio']).half().to(device)
+        self.speakers = torch.from_numpy(data['speakers']).half().to(device)
+        
+        # Close numpy file to free file handles
+        data.close()
+        
+        print(f"Data loaded to GPU. Gesture shape: {self.gestures.shape}, Audio shape: {self.audio.shape}")
+        
+        # Create segment map
+        self._create_segment_mapping()
+        
+        # Generate valid starting points
+        self.valid_starts = self._find_valid_starting_points()
+        print(f"Found {len(self.valid_starts)} valid starting points for windows")
+        
+        # Pre-generate offset tensors
+        self._create_offset_tensors()
+        
+        # Pre-generate batch indices (frame start points) for the epoch
+        self._reshuffle()
+        
+        print("Dataset initialization complete!")
+    
+    def _create_segment_mapping(self):
+        """Create a tensor mapping each frame index to its segment index"""
+        total_frames = self.metadata['total_frames']
+        
+        # Create tensor of -1s (invalid segment) of size total_frames
+        self.segment_map = torch.full((total_frames,), -1, 
+                                     device=self.device, 
+                                     dtype=torch.long)
+        
+        # Fill in segment indices
+        for i, segment in enumerate(self.metadata['file_segments']):
+            start_idx = segment['start_idx']
+            end_idx = segment['end_idx']
+            self.segment_map[start_idx:end_idx] = i
+    
+    def _create_offset_tensors(self):
+        """Pre-create offset tensors for vectorized indexing"""
+        # Seed sequence offsets: shape [1, seed_length]
+        self.seed_offsets = torch.arange(0, self.seed_length, device=self.device).view(1, -1)
+        
+        # Gesture sequence offsets: shape [1, seq_length]
+        self.gesture_offsets = torch.arange(0, self.seq_length, device=self.device).view(1, -1)
+    
+    def _find_valid_starting_points(self):
+        """Find all valid window starting points directly on GPU"""
+        valid_points = []
+        
+        # Process each file segment
+        for segment in self.metadata['file_segments']:
+            # Only consider segments long enough for a window
+            if segment['frames'] >= self.chunk_size:
+                # Generate all valid start points for this segment in one go
+                segment_starts = torch.arange(
+                    segment['start_idx'], 
+                    segment['end_idx'] - self.chunk_size + 1,
+                    device=self.device
+                )
+                valid_points.append(segment_starts)
+        
+        # Concatenate all valid points
+        return torch.cat(valid_points)
+    
+    def _reshuffle(self):
+        """Generate new batch indices for the epoch, optimized for GPU"""
+        # Generate random indices
+        indices = torch.randint(
+            0, len(self.valid_starts), 
+            (self.epoch_length * self.batch_size,),
+            device=self.device
+        )
+        # Get the actual start frames
+        all_starts = self.valid_starts[indices]
+        # Reshape into [epoch_length, batch_size]
+        self.batch_starts = all_starts.reshape(self.epoch_length, self.batch_size)
+    
+    def reshuffle(self):
+        """Public method to reshuffle data between epochs"""
+        self._reshuffle()
+        print("Reshuffled dataset with new random windows")
+    
+    def __len__(self):
+        return self.epoch_length
+    
+    def __getitem__(self, idx):
+        """Fully vectorized extraction of windows from consolidated data"""
+        # Get batch start points: shape [batch_size]
+        start_points = self.batch_starts[idx]
+        
+        # Get segment indices for speaker data
+        segment_indices = self.segment_map[start_points]
+        
+        # Create indices for seed frames: shape [batch_size, seed_length]
+        # For each batch item, calculate [start, start+1, ..., start+seed_length-1]
+        seed_indices = start_points.view(-1, 1) + self.seed_offsets
+        
+        # Create indices for gesture frames: shape [batch_size, seq_length]
+        # For each batch item, calculate [start+seed_length, start+seed_length+1, ..., start+chunk_size-1]
+        gesture_indices = (start_points.view(-1, 1) + self.seed_length) + self.gesture_offsets
+        
+        # Extract all data at once with advanced indexing - each operation is fully vectorized
+        seed_batch = self.gestures[seed_indices]  # Shape: [batch_size, seed_length, gesture_dim]
+        gesture_batch = self.gestures[gesture_indices]  # Shape: [batch_size, seq_length, gesture_dim]
+        audio_batch = self.audio[gesture_indices]  # Shape: [batch_size, seq_length, audio_dim]
+        speaker_batch = self.speakers[segment_indices]  # Shape: [batch_size, speaker_dim]
+        
+        # TODO: I think this should not be here, but instead be handled by the user after the data is retrieved
+        if not self.use_world_pos_gesture_features:
+            # Apply z-score normalization
+            gesture_batch = (gesture_batch - self.mean_pose) / self.std_pose
+            seed_batch = (seed_batch - self.mean_pose) / self.std_pose
+        
+        if self.return_audio_frame_index:
+            # Return the start frame index for the audio snippet
+            audio_frame_indices = start_points + self.seed_length
+            return gesture_batch, seed_batch, audio_batch, speaker_batch, audio_frame_indices
+        else:
+            return gesture_batch, seed_batch, audio_batch, speaker_batch
+
+
+
 class SingleSampleAnimationDataset(Dataset):
     def __init__(self, folder, seq_length_in_frames=150, seed_length_in_frames=8, 
                  batch_size=1, epoch_length=1):
@@ -289,121 +456,4 @@ class FixedSampleAnimationDataset(Dataset):
         gesture_batch = (gesture_batch - self.mean_pose) / self.std_pose
         seed_batch = (seed_batch - self.mean_pose) / self.std_pose
         
-        return gesture_batch, seed_batch, audio_batch, speaker_batch
-
-import pickle
-import soundfile as sf
-class ConsolidatedRAMDataset(Dataset):
-    """Dataset that loads consolidated data into RAM and extracts windows on-the-fly"""
-    def __init__(self, consolidated_file, seq_length=150, seed_length=8, 
-                 batch_size=32, epoch_length=1000):
-        self.seq_length = seq_length
-        self.seed_length = seed_length
-        self.batch_size = batch_size
-        self.epoch_length = epoch_length
-        self.chunk_size = seq_length + seed_length
-        
-        # Load metadata
-        meta_file = consolidated_file.replace('.npz', '_meta.pkl')
-        with open(meta_file, 'rb') as f:
-            self.metadata = pickle.load(f)
-            self.skeleton_info = self.metadata['skeleton_info']
-        
-        # Load the entire dataset into RAM
-        data = np.load(consolidated_file)
-        
-        # Convert to torch tensors for faster access
-        self.gestures = torch.from_numpy(data['gestures']).half()
-        self.audio = torch.from_numpy(data['audio']).half()
-        self.speakers = torch.from_numpy(data['speakers']).half()
-        self.mean_pose = torch.from_numpy(data['mean_pose']).half()
-        self.std_pose = torch.from_numpy(data['std_pose']).half()
-        
-        # Close numpy file to free file handles
-        data.close()
-
-        # print("Mean pose is ", self.mean_pose)
-        # print("Std pose is ", self.std_pose)
-        
-        # Generate valid starting points
-        self.valid_starts = self._find_valid_starting_points()
-        print(f"Found {len(self.valid_starts)} valid starting points for windows")
-        
-        # Pre-generate batch indices (frame start points) for the epoch
-        self._reshuffle()
-    
-    def _find_valid_starting_points(self):
-        """Find all valid window starting points (excluding boundaries between files)"""
-        valid_points = []
-        total_frames = self.metadata['total_frames']
-        
-        # Process each file segment
-        for segment in self.metadata['file_segments']:
-            # Only consider segments long enough for a window
-            if segment['frames'] >= self.chunk_size:
-                # Valid start points are from segment start to (end - chunk_size)
-                for start in range(segment['start_idx'], segment['end_idx'] - self.chunk_size + 1):
-                    valid_points.append(start)
-        
-        return valid_points
-    
-    def _reshuffle(self):
-        """Generate new batch indices for the epoch, optimized for speed"""
-        # Generate all indices at once: shape = (epoch_length * batch_size,)
-        all_indices = np.random.choice(self.valid_starts, self.epoch_length * self.batch_size, replace=True)
-        
-        # Reshape into (epoch_length, batch_size)
-        self.batch_starts = all_indices.reshape(self.epoch_length, self.batch_size)
-
-    
-    def reshuffle(self):
-        """Public method to reshuffle data between epochs"""
-        self._reshuffle()
-        print("Reshuffled dataset with new random windows")
-    
-    def __len__(self):
-        return self.epoch_length
-    
-    def __getitem__(self, idx):
-        """Extract windows on-the-fly from the consolidated data"""
-        start_points = self.batch_starts[idx]
-        
-        # Pre-allocate tensors for this batch
-        gesture_batch = torch.zeros(
-            (self.batch_size, self.seq_length, self.metadata['gesture_dim']), 
-            dtype=torch.float16
-        )
-        seed_batch = torch.zeros(
-            (self.batch_size, self.seed_length, self.metadata['gesture_dim']), 
-            dtype=torch.float16
-        )
-        audio_batch = torch.zeros(
-            (self.batch_size, self.seq_length, self.metadata['audio_dim']), 
-            dtype=torch.float16
-        )
-        speaker_batch = torch.zeros(
-            (self.batch_size, self.metadata['speaker_shape'][0]), 
-            dtype=torch.float16
-        )
-        
-        # For each item in the batch
-        for i, start_frame in enumerate(start_points):
-            # Find which file segment this frame belongs to
-            segment_idx = next(
-                (idx for idx, seg in enumerate(self.metadata['file_segments']) 
-                 if seg['start_idx'] <= start_frame < seg['end_idx']), 
-                None
-            )
-            
-            if segment_idx is not None:
-                # Extract windows directly from tensors
-                seed_batch[i] = self.gestures[start_frame:start_frame + self.seed_length]
-                gesture_batch[i] = self.gestures[start_frame + self.seed_length:start_frame + self.chunk_size]
-                audio_batch[i] = self.audio[start_frame + self.seed_length:start_frame + self.chunk_size]
-                speaker_batch[i] = self.speakers[segment_idx]
-
-        # z-score normalization
-        gesture_batch = (gesture_batch - self.mean_pose) / self.std_pose
-        seed_batch = (seed_batch - self.mean_pose) / self.std_pose
-
         return gesture_batch, seed_batch, audio_batch, speaker_batch

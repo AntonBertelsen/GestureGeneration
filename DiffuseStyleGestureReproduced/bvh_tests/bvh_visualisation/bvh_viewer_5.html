@@ -50,6 +50,10 @@
 
         let noInterpolation = true;
 
+        let debugPositions = [];
+        const sphereGeometry = new THREE.SphereGeometry(0.025, 16, 8);
+        const sphereMaterial = new THREE.MeshBasicMaterial({ color: 0xff0000 });
+
         // Add this function to initialize audio context
         function initAudioContext() {
             // Create audio context (with user interaction to satisfy autoplay policies)
@@ -82,6 +86,32 @@
                     if (frameData.audio_chunk) {
                         processAudioChunk(frameData.audio_chunk);
                     }
+
+                    let debugHeight = 0;
+
+                    // Process debug positions if present and display them as red shperes
+                    if (frameData.debug_positions) {
+
+                        console.log(`Received ${frameData.debug_positions.length} debug positions`);
+                        frameData.debug_positions.forEach((pos) => {
+                            console.log(`Position: ${pos.name} - ${pos.position.x}, ${pos.position.y}, ${pos.position.z}`);
+
+                            // See if the position is already in the debugPositions array
+                            const existingPos = debugPositions.find(p => p.name === pos.name);
+                            if (existingPos) {
+                                console.log(`Updating existing position: ${pos.name}`);
+                                existingPos.position.set(pos.position.x * 0.01, pos.position.y * 0.01, pos.position.z * 0.01);
+                            } else {
+                                console.log(`Creating new position: ${pos.name}`);
+                                const sphere = new THREE.Mesh(sphereGeometry, sphereMaterial);
+                                sphere.name = pos.name;
+                                sphere.position.set(pos.position.x * 0.01, pos.position.y * 0.01, pos.position.z * 0.01);
+                                scene.add(sphere);
+                                debugPositions.push(sphere);
+                            }
+                        });
+                    }
+
                     // directly apply the frame data to the skeleton
                     applyFrameToSkeleton(frameData);
                     
@@ -414,9 +444,9 @@
                     // Apply position (typically only for root bone)
                     if (jointData.position) {
                         bone.position.set(
-                            jointData.position.x * 0.005, // Apply your scale factor
-                            jointData.position.y * 0.005,
-                            jointData.position.z * 0.005
+                            jointData.position.x * 0.01, // Apply your scale factor
+                            jointData.position.y * 0.01,
+                            jointData.position.z * 0.01
                         );
                     }
                     
