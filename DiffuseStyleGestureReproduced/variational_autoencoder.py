@@ -6,6 +6,7 @@ import torch.nn.functional as F
 class VAE(nn.Module):
     def __init__(self, z_dim=32, pose_dim=345):
         super(VAE, self).__init__()
+        self.pose_dim = pose_dim
         self.z_dim = z_dim
 
         # Encoder network

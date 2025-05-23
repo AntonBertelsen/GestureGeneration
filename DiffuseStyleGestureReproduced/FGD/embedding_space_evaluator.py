@@ -1,22 +1,22 @@
 import numpy as np
 import torch
-from scipy import linalg
 
-from embedding_net import EmbeddingNet
+from FGD.embedding_net import EmbeddingNet
 
 import warnings
 warnings.filterwarnings("ignore", category=RuntimeWarning)  # ignore warnings
 
 
 class EmbeddingSpaceEvaluator:
-    def __init__(self, embed_net_path, n_frames, device):
+    def __init__(self, embed_net_path, n_frames, device, pose_dim):
         # init embed net
         ckpt = torch.load(embed_net_path, map_location=device)
-        self.pose_dim = ckpt['pose_dim']
+        self.pose_dim = pose_dim
         self.net = EmbeddingNet(self.pose_dim, n_frames).to(device)
-        self.net.load_state_dict(ckpt['gen_dict'])
+        self.net.load_state_dict(ckpt)
         self.net.train(False)
 
+        self.device = device
         self.reset()
 
     def reset(self):
@@ -39,10 +39,10 @@ class EmbeddingSpaceEvaluator:
         self.generated_feat_list.append(feat.data.cpu().numpy())
 
     def get_fgd(self, use_feat_space=True):
-        if use_feat_space:  # on feature space
+        if use_feat_space:
             generated_data = np.vstack(self.generated_feat_list)
             real_data = np.vstack(self.real_feat_list)
-        else:  # on raw pose space
+        else:
             generated_data = np.vstack(self.generate_samples)
             real_data = np.vstack(self.real_samples)
 
@@ -50,67 +50,50 @@ class EmbeddingSpaceEvaluator:
         return frechet_dist
 
     def frechet_distance(self, samples_A, samples_B):
+        print("Calculating means and covariances...")
         A_mu = np.mean(samples_A, axis=0)
         A_sigma = np.cov(samples_A, rowvar=False)
         B_mu = np.mean(samples_B, axis=0)
         B_sigma = np.cov(samples_B, rowvar=False)
+
+        print("Calculating frechet distance with fast PyTorch sqrtm...")
+        A_mu_torch = torch.from_numpy(A_mu).to(torch.float32).to(self.device)
+        A_sigma_torch = torch.from_numpy(A_sigma).to(torch.float32).to(self.device)
+        B_mu_torch = torch.from_numpy(B_mu).to(torch.float32).to(self.device)
+        B_sigma_torch = torch.from_numpy(B_sigma).to(torch.float32).to(self.device)
+
         try:
-            frechet_dist = self.calculate_frechet_distance(A_mu, A_sigma, B_mu, B_sigma)
-        except ValueError:
+            frechet_dist = self.torch_frechet_distance(A_mu_torch, A_sigma_torch,
+                                                       B_mu_torch, B_sigma_torch)
+        except Exception as e:
+            print("Frechet distance failed:", e)
             frechet_dist = 1e+10
         return frechet_dist
 
-    @staticmethod
-    def calculate_frechet_distance(mu1, sigma1, mu2, sigma2, eps=1e-6):
-        """ from https://github.com/mseitzer/pytorch-fid/blob/master/fid_score.py """
-        """Numpy implementation of the Frechet Distance.
-        The Frechet distance between two multivariate Gaussians X_1 ~ N(mu_1, C_1)
-        and X_2 ~ N(mu_2, C_2) is
-                d^2 = ||mu_1 - mu_2||^2 + Tr(C_1 + C_2 - 2*sqrt(C_1*C_2)).
-        Stable version by Dougal J. Sutherland.
-        Params:
-        -- mu1   : Numpy array containing the activations of a layer of the
-                   inception net (like returned by the function 'get_predictions')
-                   for generated samples.
-        -- mu2   : The sample mean over activations, precalculated on an
-                   representative data set.
-        -- sigma1: The covariance matrix over activations for generated samples.
-        -- sigma2: The covariance matrix over activations, precalculated on an
-                   representative data set.
-        Returns:
-        --   : The Frechet Distance.
-        """
-
-        mu1 = np.atleast_1d(mu1)
-        mu2 = np.atleast_1d(mu2)
-
-        sigma1 = np.atleast_2d(sigma1)
-        sigma2 = np.atleast_2d(sigma2)
-
-        assert mu1.shape == mu2.shape, \
-            'Training and test mean vectors have different lengths'
-        assert sigma1.shape == sigma2.shape, \
-            'Training and test covariances have different dimensions'
-
+    def torch_frechet_distance(self, mu1, sigma1, mu2, sigma2, eps=1e-6):
         diff = mu1 - mu2
+        cov_prod = sigma1 @ sigma2
 
-        # Product might be almost singular
-        covmean, _ = linalg.sqrtm(sigma1.dot(sigma2), disp=False)
-        if not np.isfinite(covmean).all():
-            msg = ('fid calculation produces singular product; '
-                   'adding %s to diagonal of cov estimates') % eps
-            print(msg)
-            offset = np.eye(sigma1.shape[0]) * eps
-            covmean = linalg.sqrtm((sigma1 + offset).dot(sigma2 + offset))
+        covmean = self.matrix_sqrt_newton_schulz(cov_prod, eps=eps)
 
-        # Numerical error might give slight imaginary component
-        if np.iscomplexobj(covmean):
-            if not np.allclose(np.diagonal(covmean).imag, 0, atol=1e-3):
-                m = np.max(np.abs(covmean.imag))
-                raise ValueError('Imaginary component {}'.format(m))
-            covmean = covmean.real
+        if torch.is_complex(covmean):
+            covmean = covmean.real  # in case of small imaginary parts
 
-        tr_covmean = np.trace(covmean)
+        tr_covmean = torch.trace(covmean)
+        return (diff @ diff + torch.trace(sigma1) +
+                torch.trace(sigma2) - 2 * tr_covmean).item()
 
-        return (diff.dot(diff) + np.trace(sigma1) +
-                np.trace(sigma2) - 2 * tr_covmean)
+    def matrix_sqrt_newton_schulz(self, A, num_iters=50, eps=1e-10):
+        normA = A.norm()
+        Y = A / normA
+        I = torch.eye(A.size(0), device=A.device)
+        Z = torch.eye(A.size(0), device=A.device)
+
+        for i in range(num_iters):
+            T = 0.5 * (3.0 * I - Z @ Y)
+            Y = Y @ T
+            Z = T @ Z
+            if (Y @ Y - I).abs().max() < eps:
+                break
+
+        return Y * torch.sqrt(normA)

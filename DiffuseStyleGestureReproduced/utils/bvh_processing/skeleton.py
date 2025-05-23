@@ -91,6 +91,27 @@ class Skeleton:
         """Set the bone categories for loss weights."""
         self.bone_categories = bone_categories
     
+    def construct_bone_weighting_vector(self, category_weighting) -> torch.Tensor:
+        num_features = self.get_channel_count()
+        bone_index_weighted_by_category_vector = torch.ones(num_features)
+        bone_index_weighted_by_category_vector = bone_index_weighted_by_category_vector.to(self.device)
+
+        # Assign weights based on the categories
+        for category, weight in category_weighting.items():
+            # Check if the category exists in the skeleton info
+            if category not in self.bone_categories:
+                print(f"Warning: Category '{category}' not found in skeleton info. Skipping.")
+                continue
+            for bone_name in self.bone_categories[category]:
+                bone_indices = self.bone_to_indices_map[bone_name]
+                # Check if bone exists in the skeleton info
+                if bone_indices is None:
+                    print(f"Warning: Bone '{bone_name}' not found in skeleton info. Skipping.")
+                    continue
+                for index in bone_indices:
+                    bone_index_weighted_by_category_vector[index] = weight
+        return bone_index_weighted_by_category_vector
+
     def _precompute_mappings(self) -> None:
         """Precompute mappings for fast extraction/insertion."""
         # Reset mappings

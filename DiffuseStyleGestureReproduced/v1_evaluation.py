@@ -4,30 +4,59 @@ from torch.utils.data import DataLoader
 from utils.bvh_processing.bvh_converter import Skeleton
 from FGD.embedding_space_evaluator import EmbeddingSpaceEvaluator
 
-def evaluate_frechet_gesture_distance(model: ContinuousMotionModel, val_loader: DataLoader, device: torch.device, autoencoder_model=None, n_frames: int = 32, embeddingSpaceEvaluator: EmbeddingSpaceEvaluator = None) -> None:
-    model.eval()
+def evaluate_frechet_gesture_distance(model: ContinuousMotionModel, val_loader: DataLoader, device: torch.device, autoencoder_model=None, evaluation_length = 30, num_samples = 100) -> None:
     with torch.no_grad():
 
+        n_frames = evaluation_length
+
+        # first we need to create the embedding space evaluator
+        embeddingSpaceEvaluator = EmbeddingSpaceEvaluator(
+            embed_net_path  = f"FGD/models/fgd_model_{evaluation_length}.pth",
+            n_frames        = evaluation_length,
+            device          = device,
+            pose_dim        = len(val_loader.dataset.skeleton.target_joints) * 3
+        )
+
+        batch_size = num_samples
+
+        # We need to retrieve sequences of a certain length from the dataloader
+        # This is pretty hacky, but allows us to just reuse the validation dataloader
+        # TODO: Find a better way to do this that is compatible with other datasets as well
+        old_batch_size = val_loader.dataset.batch_size
+        val_loader.dataset.batch_size = batch_size
+        
+        old_valid_starts = val_loader.dataset.valid_starts
+
+        old_sequence_length = val_loader.dataset.seq_length
+        val_loader.dataset.seq_length = model.num_of_pre_timestep_frames + 2 * model.num_of_timestep_frames + model.num_of_post_timestep_frames + n_frames
+        val_loader.dataset.chunk_size = val_loader.dataset.seq_length + val_loader.dataset.seed_length
+        val_loader.dataset._create_offset_tensors()
+        val_loader.dataset.valid_starts = val_loader.dataset._find_valid_starting_points()
+        val_loader.dataset.reshuffle()
+        
         skeleton: Skeleton = val_loader.dataset.skeleton
 
         # We load all the data we need. even when we have generated everything. 
         # That is we need the starting point (The "seed"), which gives us the starting clean gesture from which we continue our generation. (num_presteps)
-        # We also need enough data to move past the the noising area (num_steps)
+        # We also need enough data to move past the the noising area (num_of_timestep_frames) + the initial noising area (num_of_timestep_frames)
         # We also need enough data to have n_frames of data generated when we are done. (n_frames)
-        # i.e. sequence length retrieved by val_loader should be num_presteps + num_steps + post-timestep frames + n_frames
+        # i.e. sequence length retrieved by val_loader should be num_presteps + 2 * num_of_timestep_frames + num_of_post_timestep_frames + n_frames
         full_gesture_sequence, _, full_audio_features, main_agent_id_one_hot = [
             item.squeeze(0).to(device) for item in next(iter(val_loader)) # TODO: Maybe this always returns the same item? Hopefully not
         ]
 
-        batch_size = full_gesture_sequence.shape[0]
         feature_dim = full_gesture_sequence.shape[2]
+        encoded_feature_dim = autoencoder_model.z_dim if autoencoder_model is not None else feature_dim
 
         # We prepare a result tensor to store the generated data
         # This is of shape (bs, num_timestep_frames + n_frames, feature_dim)
         result_tensor = torch.zeros(
-            (batch_size, model.num_of_timestep_frames + n_frames, feature_dim),
+            (batch_size, model.num_of_timestep_frames + n_frames, encoded_feature_dim),
             device=device,
         )
+
+        # Cast to float precision (TODO: Why are we doing this?)
+        full_gesture_sequence = full_gesture_sequence.float()
 
         if autoencoder_model is not None:
             full_encoded_gesture_sequence, _ = autoencoder_model.encode(full_gesture_sequence)
@@ -37,14 +66,13 @@ def evaluate_frechet_gesture_distance(model: ContinuousMotionModel, val_loader: 
         # Now we need to cut the sequence to the right length.
         # We need to cut the sequence to the length of the pre-timestep frames + timestep frames + post-timestep frames
         # The audio features should be cut in the same way
-        current_encoded_gesture_sequence = full_encoded_gesture_sequence[:, i:i + model.num_of_pre_timestep_frames + model.num_of_timestep_frames + model.num_of_post_timestep_frames]
+        current_encoded_gesture_sequence = full_encoded_gesture_sequence[:, 0:model.num_of_pre_timestep_frames + model.num_of_timestep_frames + model.num_of_post_timestep_frames,:]
 
         for i in range(n_frames + model.num_of_timestep_frames):
-
             # We also need to cut out the relevant audio features. As these are not predicted by the model we cut them out of the full audio features
             # at every iteration
-            current_audio_features = full_audio_features[:, i:i + model.num_of_pre_timestep_frames + model.num_of_timestep_frames + model.num_of_post_timestep_frames]
-            
+            current_audio_features = full_audio_features[:, i:i + model.num_of_pre_timestep_frames + model.num_of_timestep_frames + model.num_of_post_timestep_frames, :]
+
             for stacking_step in range(model.max_timestep_stacking_level):                
                 # We apply noise to the gesture sequence at every iteration because we predict the clean image at every step.
                 starting_point_encoded_gesture_sequence = current_encoded_gesture_sequence
@@ -55,6 +83,11 @@ def evaluate_frechet_gesture_distance(model: ContinuousMotionModel, val_loader: 
                     stacking_step=stacking_step,
                 )
 
+                # print(f"current_encoded_gesture_sequence.shape: {current_encoded_gesture_sequence.shape}")
+                # print(f"noisy_gesture_sequence.shape: {noisy_gesture_sequence.shape}")
+                # print(f"current_audio_features.shape: {current_audio_features.shape}")
+                # print(f"main_agent_id_one_hot.shape: {main_agent_id_one_hot.shape}")
+                # print(f"stacking_step: {stacking_step}")
                 current_encoded_gesture_sequence = model(
                     current_time_step_stacking_level = stacking_step,
                     one_hot_style = main_agent_id_one_hot,
@@ -66,7 +99,7 @@ def evaluate_frechet_gesture_distance(model: ContinuousMotionModel, val_loader: 
             # The model predicts the whole sequence, but only the last frames were noised to begin with. We are essentially doing infill-diffusion.
             # We need to copy the original data to the result tensor, so that we can use it as a starting point for the next iteration.
             # We copy the original real data on top of the area that was not denoised, in order to avoid the model degenerating over time.
-            current_encoded_gesture_sequence[:, :model.num_of_pre_timestep_frames, :] = starting_point_encoded_gesture_sequence[:, :model.num_of_post_timestep_frames, :]
+            current_encoded_gesture_sequence[:, :model.num_of_pre_timestep_frames, :] = starting_point_encoded_gesture_sequence[:, :model.num_of_pre_timestep_frames, :]
 
             # copy the newest predicted frame to the result tensor
             result_tensor[:, i, :] = current_encoded_gesture_sequence[:, model.num_of_pre_timestep_frames, :] # TODO: Make sure this is the correct frame being copied. I am slighty worried we are copying one frame to far forward (i.e. still not fully denoised)
@@ -88,7 +121,7 @@ def evaluate_frechet_gesture_distance(model: ContinuousMotionModel, val_loader: 
             output = result_tensor
 
         # We want to perform FGD calculations on the world pose space. AS such we need to calculate this.
-        
+
         # First we need to denormalized the output tensor to recover the original feature space (the rotation matrices)
         denormalized_output = skeleton.denormalize_poses(output)
 
@@ -98,35 +131,45 @@ def evaluate_frechet_gesture_distance(model: ContinuousMotionModel, val_loader: 
         # Now we want to z-normalize the world positions to get the final output tensor
         normalized_world_positions = skeleton.normalize_world_positions(world_positions)
 
-        embeddingSpaceEvaluator.reset()
-        embeddingSpaceEvaluator.push_real_samples(full_gesture_sequence)
         embeddingSpaceEvaluator.push_generated_samples(normalized_world_positions)
-
-        synthesis_frechet_distance = embeddingSpaceEvaluator.get_fgd(use_feat_space=False)
-        synthesis_frechet_distance_feat_space = embeddingSpaceEvaluator.get_fgd(use_feat_space=True)
-        print(f"Synthesis Frechet Distance: {synthesis_frechet_distance}")
-        print(f"Synthesis Frechet Distance (Feature Space): {synthesis_frechet_distance_feat_space}")
 
         ########################################
 
         # We also need to acquire the original gesture sequence in world space
         # We need to cut out the area of the original gesture sequence that is equivalent to the area we generated
-
         # This is [num_presteps + num_steps: num_presteps + num_steps + n_frames]
-        original_gesture_sequence = full_gesture_sequence[:, model.num_of_pre_timestep_frames + model.num_of_timestep_frames: model.num_of_pre_timestep_frames + model.num_of_timestep_frames + n_frames]
+        original_gesture_sequence = full_gesture_sequence[:, model.num_of_pre_timestep_frames + model.num_of_timestep_frames:model.num_of_pre_timestep_frames + model.num_of_timestep_frames + n_frames, :]
+        
         # We need to denormalize the original gesture sequence to recover the original feature space (the rotation matrices)
         denormalized_original_gesture_sequence = skeleton.denormalize_poses(original_gesture_sequence)
+        
         # Now we want to calcualte world postions from the denormalized original gesture sequence
         world_positions = skeleton.calculate_world_positions(denormalized_original_gesture_sequence)
         # Now we want to z-normalize the world positions to get the final output tensor
+        
         normalized_original_world_positions = skeleton.normalize_world_positions(world_positions)
 
-        embeddingSpaceEvaluator.reset()
-        embeddingSpaceEvaluator.push_real_samples(full_gesture_sequence)
-        embeddingSpaceEvaluator.push_generated_samples(normalized_original_world_positions)
-        original_frechet_distance = embeddingSpaceEvaluator.get_fgd(use_feat_space=False)
-        original_frechet_distance_feat_space = embeddingSpaceEvaluator.get_fgd(use_feat_space=True)
-        print(f"Original Frechet Distance: {original_frechet_distance}")
-        print(f"Original Frechet Distance (Feature Space): {original_frechet_distance_feat_space}")
+        embeddingSpaceEvaluator.push_real_samples(normalized_original_world_positions)
 
-        return synthesis_frechet_distance, original_frechet_distance, synthesis_frechet_distance_feat_space, original_frechet_distance_feat_space
+        # Now we can calculate the Frechet distances
+        frechet_distance = embeddingSpaceEvaluator.get_fgd(use_feat_space=False)
+        frechet_distance_feat_space = embeddingSpaceEvaluator.get_fgd(use_feat_space=True)
+        
+        # Now that we are done we need to reset the sequence length and batch size of the dataloader
+        val_loader.dataset.seq_length = old_sequence_length
+        val_loader.dataset.chunk_size = val_loader.dataset.seq_length + val_loader.dataset.seed_length
+        val_loader.dataset._create_offset_tensors()
+        val_loader.dataset.valid_starts = old_valid_starts
+        val_loader.dataset.batch_size = old_batch_size
+
+        print(f"val_loader.dataset.batch_size: {val_loader.dataset.batch_size}")
+        print(f"val_loader.dataset.seq_length: {val_loader.dataset.seq_length}")
+        print(f"val_loader.dataset.valid_starts: {val_loader.dataset.valid_starts}")
+
+        # Print the results in a pretty format
+        # print(f"Frechet Distance: {synthesis_frechet_distance:.4f} (Feature Space: {synthesis_frechet_distance_feat_space:.4f})")
+        # print(f"Original Frechet Distance: {original_frechet_distance:.4f} (Feature Space: {original_frechet_distance_feat_space:.4f})")
+
+        # Set the model back to training mode
+
+        return frechet_distance_feat_space, frechet_distance

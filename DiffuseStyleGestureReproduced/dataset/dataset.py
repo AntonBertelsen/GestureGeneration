@@ -130,7 +130,7 @@ class GPUDataset(Dataset):
     """Dataset that keeps data on GPU for maximum performance with vectorized operations"""
     def __init__(self, consolidated_file, seq_length=150, seed_length=8, 
                  batch_size=32, epoch_length=1000, return_audio_frame_index=False,
-                 device='cuda', use_world_pos_gesture_features=False):
+                 device=torch.device('cuda'), use_world_pos_gesture_features=False):
         self.seq_length = seq_length
         self.seed_length = seed_length
         self.batch_size = batch_size
@@ -147,6 +147,8 @@ class GPUDataset(Dataset):
         with open(meta_file, 'rb') as f:
             self.metadata = pickle.load(f)
             self.skeleton = self.metadata['skeleton']
+
+            self.skeleton.set_device(device)
             
             # Move normalization stats directly to GPU
             self.mean_pose = torch.from_numpy(self.metadata['mean_pose']).half().to(device)

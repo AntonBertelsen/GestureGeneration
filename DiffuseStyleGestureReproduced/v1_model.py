@@ -41,6 +41,8 @@ class ContinuousMotionModel(nn.Module):
         self.num_of_timestep_frames = diffusion_noise_scheduler.num_of_timestep_frames
         self.num_of_post_timestep_frames = diffusion_noise_scheduler.num_of_post_timestep_frames
 
+        self.pose_features_per_frame = pose_features_per_frame 
+
         self.n_gesture_length = n_gesture_length
 
         # TODO: This seems wrong, can't we just apply the error message to assert?
