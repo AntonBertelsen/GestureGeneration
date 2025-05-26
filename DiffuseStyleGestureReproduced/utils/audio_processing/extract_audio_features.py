@@ -69,7 +69,6 @@ def extract_audio_features(audio_file):
     # return mel_spec, mfcc, rms_energy, pitch, energy_derivatives, pitch_derivatives, onsets, wavlm_features
     return mel_spec, mfcc, rms_energy, pitch, energy_derivatives, pitch_derivatives, onsets
 
-
 def extract_simple_features(waveform, sample_rate, device):
 
     # The frame length is the number of samples that we consider for each calculation of the feature.
@@ -100,7 +99,6 @@ def extract_simple_features(waveform, sample_rate, device):
     rms_energy = energy_transform(waveform).squeeze(0)
     pitch = pitch_transform(waveform).squeeze(0)
 
-
     # Derivative features. This is used by the orignal implementation, although they never mention it in the paper.
     energy_derivatives = torch.cat([torch.zeros(1).to(device), torch.diff(rms_energy)])
     pitch_derivatives = torch.cat([torch.zeros(1).to(device), torch.diff(pitch)])
@@ -119,7 +117,6 @@ def extract_simple_features(waveform, sample_rate, device):
     return mel_spec, mfcc, rms_energy, pitch, energy_derivatives, pitch_derivatives, onsets
 
 def extract_wavlm_features(waveform, device):
-
 
     # Load the pretrained model and feature extractor
     feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained("microsoft/wavlm-base")
