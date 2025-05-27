@@ -73,27 +73,19 @@ def evaluate_frechet_gesture_distance(model: ContinuousMotionModel, val_loader: 
             # at every iteration
             current_audio_features = full_audio_features[:, i:i + model.num_of_pre_timestep_frames + model.num_of_timestep_frames + model.num_of_post_timestep_frames, :]
 
-            for stacking_step in range(model.max_timestep_stacking_level):                
+            for stacking_level in range(model.max_timestep_stacking_level):                
                 # We apply noise to the gesture sequence at every iteration because we predict the clean image at every step.
                 starting_point_encoded_gesture_sequence = current_encoded_gesture_sequence
                 
                 diffusion = model.diffusion_noise_scheduler
-                noisy_gesture_sequence = diffusion.forward(
-                    sequence_tensor=current_encoded_gesture_sequence,
-                    stacking_step=stacking_step,
-                )
+                noisy_gesture_sequence = diffusion.forward(current_encoded_gesture_sequence, stacking_level)
 
-                # print(f"current_encoded_gesture_sequence.shape: {current_encoded_gesture_sequence.shape}")
-                # print(f"noisy_gesture_sequence.shape: {noisy_gesture_sequence.shape}")
-                # print(f"current_audio_features.shape: {current_audio_features.shape}")
-                # print(f"main_agent_id_one_hot.shape: {main_agent_id_one_hot.shape}")
-                # print(f"stacking_step: {stacking_step}")
                 current_encoded_gesture_sequence = model(
-                    current_time_step_stacking_level = stacking_step,
-                    one_hot_style = main_agent_id_one_hot,
-                    audio_features = current_audio_features, 
-                    noisy_gesture_sequence = noisy_gesture_sequence,
-                    condition_mask_probabilty = 0.0,
+                    time_step_stacking_level    = stacking_level,
+                    one_hot_style               = main_agent_id_one_hot,
+                    audio_features              = current_audio_features, 
+                    noisy_gesture_sequence      = noisy_gesture_sequence,
+                    condition_mask_probabilty   = 0.0,
                 )
 
             # The model predicts the whole sequence, but only the last frames were noised to begin with. We are essentially doing infill-diffusion.
@@ -162,14 +154,7 @@ def evaluate_frechet_gesture_distance(model: ContinuousMotionModel, val_loader: 
         val_loader.dataset.valid_starts = old_valid_starts
         val_loader.dataset.batch_size = old_batch_size
 
-        print(f"val_loader.dataset.batch_size: {val_loader.dataset.batch_size}")
-        print(f"val_loader.dataset.seq_length: {val_loader.dataset.seq_length}")
-        print(f"val_loader.dataset.valid_starts: {val_loader.dataset.valid_starts}")
-
-        # Print the results in a pretty format
-        # print(f"Frechet Distance: {synthesis_frechet_distance:.4f} (Feature Space: {synthesis_frechet_distance_feat_space:.4f})")
-        # print(f"Original Frechet Distance: {original_frechet_distance:.4f} (Feature Space: {original_frechet_distance_feat_space:.4f})")
-
         # Set the model back to training mode
+        model.train()
 
-        return frechet_distance_feat_space, frechet_distance
+        return frechet_distance, frechet_distance_feat_space, 

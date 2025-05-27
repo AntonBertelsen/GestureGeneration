@@ -99,7 +99,7 @@ class Skeleton:
         # Assign weights based on the categories
         for category, weight in category_weighting.items():
             # Check if the category exists in the skeleton info
-            if category not in self.bone_categories:
+            if self.bone_categories is None or category not in self.bone_categories:
                 print(f"Warning: Category '{category}' not found in skeleton info. Skipping.")
                 continue
             for bone_name in self.bone_categories[category]:

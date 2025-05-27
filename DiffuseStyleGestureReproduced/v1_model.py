@@ -222,7 +222,7 @@ class ContinuousMotionModel(nn.Module):
 
 
     def forward(self, 
-                current_time_step_stacking_level: int,
+                time_step_stacking_level: int,
                 one_hot_style, 
                 audio_features, 
                 noisy_gesture_sequence,
@@ -274,9 +274,9 @@ class ContinuousMotionModel(nn.Module):
         timestep_max_pos_embedding = self.time_step_mlp(self.timestep_max / self.timestep_max)  # (bs, 1, 1) -> (bs, 1, 64)
         
         # For the de-nosing steps
-        # print("!!!!, current_time_step_stacking_level: ", current_time_step_stacking_level)
-        timesteps_for_frames = self.timesteps_for_frames_at_stacking_level[current_time_step_stacking_level]  # (bs, t_for_each_timestep_frame, 1) -> (bs, t_for_each_timestep_frame, 1)
-        # print("!!!!, current_time_step_stacking_level: ", current_time_step_stacking_level,"  timesteps_for_frames IN THE FORWARD PASS: ", timesteps_for_frames, " shape: ", timesteps_for_frames.shape)
+        # print("!!!!, time_step_stacking_level: ", time_step_stacking_level)
+        timesteps_for_frames = self.timesteps_for_frames_at_stacking_level[time_step_stacking_level]  # (bs, t_for_each_timestep_frame, 1) -> (bs, t_for_each_timestep_frame, 1)
+        # print("!!!!, time_step_stacking_level: ", time_step_stacking_level,"  timesteps_for_frames IN THE FORWARD PASS: ", timesteps_for_frames, " shape: ", timesteps_for_frames.shape)
         t_with_pos_embedding_for_each_timestep_frame = self.time_step_mlp(
             timesteps_for_frames / self.timestep_max
         )  # (bs, t_for_each_timestep_frame, 64)
@@ -406,91 +406,6 @@ class ContinuousMotionModel(nn.Module):
         output_tensor = self.final_linear(transformer_encoder_output)
         self.debugger.capture(("output_tensor", output_tensor), [Show.MAX_MIN, Show.IMAGE], keys="output_tensor")
         # 4 - Return the output of the liniear layer
-        return output_tensor
-    
-    def forward_with_profiling(self, 
-            current_time_step_stacking_level: int,
-            one_hot_style, 
-            audio_features, 
-            noisy_gesture_sequence,
-            condition_mask_probabilty = 0.1):
-    
-        from torch.profiler import profile, record_function, ProfilerActivity
-        
-        profiling_results = {}
-        
-        with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
-                    record_shapes=True) as prof:
-            # Input preprocessing
-            with record_function("input_prep"):
-                # Ensure all inputs have the same dtype as the model weights
-                weight_dtype = self.audio_linear.weight.dtype
-                one_hot_style = one_hot_style.to(weight_dtype)
-                audio_features = audio_features.to(weight_dtype)
-                noisy_gesture_sequence = noisy_gesture_sequence.to(weight_dtype)
-            
-            # Time step embedding
-            with record_function("timestep_embedding"):
-                timestep_0_pos_embedding = self.time_step_mlp(self.timestep_0 / self.timestep_max)
-                timestep_max_pos_embedding = self.time_step_mlp(self.timestep_max / self.timestep_max)
-                timesteps_for_frames = self.timesteps_for_frames_at_stacking_level[current_time_step_stacking_level]
-                t_with_pos_embedding_for_each_timestep_frame = self.time_step_mlp(
-                    timesteps_for_frames / self.timestep_max
-                )
-            
-            # Style processing
-            with record_function("style_processing"):
-                style = self.style_linear(one_hot_style)
-                style_mask = torch.bernoulli(torch.full_like(style, 1 - condition_mask_probabilty))
-                style *= style_mask
-                
-                style_plus_t_0_pos_embedding = style + timestep_0_pos_embedding
-                style_plus_t_max_pos_embedding = style + timestep_max_pos_embedding
-                
-                pre_timesteps_style_vectors = style_plus_t_0_pos_embedding.unsqueeze(1).expand(
-                    style_plus_t_0_pos_embedding.shape[0], self.num_of_pre_timestep_frames, style_plus_t_0_pos_embedding.shape[1]
-                )
-                post_timesteps_style_vectors = style_plus_t_max_pos_embedding.unsqueeze(1).expand(
-                    style_plus_t_max_pos_embedding.shape[0], self.num_of_post_timestep_frames, style_plus_t_max_pos_embedding.shape[1]
-                )
-                
-                style_plus_t_for_each_timestep_frame = t_with_pos_embedding_for_each_timestep_frame + style.unsqueeze(1).expand(
-                    style.shape[0], self.num_of_timestep_frames, style.shape[1]
-                )
-                
-                style_t_frames = torch.cat([pre_timesteps_style_vectors, style_plus_t_for_each_timestep_frame, post_timesteps_style_vectors], dim=1)
-            
-            # Feature processing
-            with record_function("feature_processing"):
-                audio_features = self.audio_linear(audio_features)
-                noisy_gesture_sequence = self.noisy_gesture_linear(noisy_gesture_sequence)
-                audio_noisy_gesture = torch.cat([audio_features, noisy_gesture_sequence], dim=-1)
-                full_data_tensor = torch.cat([style_t_frames, audio_noisy_gesture], dim=-1)
-                input_tensor = self.pre_local_attention_linear(full_data_tensor)
-            
-            # Attention layers
-            with record_function("local_attention"):
-                local_attention_output = self.multi_head_local_attention(input_tensor)
-            
-            with record_function("rotary_pos_emb"):
-                relative_positional_embedding, scale = self.relative_positional_embedding_funtion(local_attention_output)
-                local_attention_output, _ = apply_rotary_pos_emb(
-                    local_attention_output, local_attention_output, relative_positional_embedding, scale
-                )
-            
-            with record_function("transformer_encoder"):
-                transformer_encoder_output = self.transformer_encoder(local_attention_output)
-            
-            # Final output
-            with record_function("final_linear"):
-                output_tensor = self.final_linear(transformer_encoder_output)
-        
-        profiling_results = prof.key_averages().table(sort_by="cuda_time_total", row_limit=10)
-        print(profiling_results)
-        
-        # You might also want to save the profiling results to a file
-        prof.export_chrome_trace("forward_trace.json")
-        
         return output_tensor
 
     # Functions for Weights & Biases tracking

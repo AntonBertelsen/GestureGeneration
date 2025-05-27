@@ -87,9 +87,9 @@ class Diffusion(WnBTrackable):
         
 
 
-    def forward(self, sequence_tensor: torch.Tensor, stacking_step = 0) -> torch.Tensor:
+    def forward(self, sequence_tensor: torch.Tensor, stacking_level = 0) -> torch.Tensor:
 
-        assert(0 <= stacking_step <= self.num_of_timestep_stackings), "Stacking step is out of range. Must be less than or equal to num_of_timestep_stackings"
+        assert(0 <= stacking_level <= self.num_of_timestep_stackings), "Stacking level is out of range. Must be less than or equal to num_of_timestep_stackings"
 
         # 1 - We use the provided noise schedule funtion to get the intensity (?) of the noise at the current time step.
         #     This is a value between 0 and 1, and determine the amount of noise to add to the 'image'.
@@ -123,8 +123,8 @@ class Diffusion(WnBTrackable):
         # print("sqrt_alpha_hats", self.sqrt_alpha_hats.shape, self.sqrt_alpha_hats)
         # print("sqrt_one_minus_alpha_hats", self.sqrt_one_minus_alpha_hats.shape, self.sqrt_one_minus_alpha_hats)
 
-        self.sqrt_alpha_hats = self.time_step_stackings[stacking_step][0]
-        self.sqrt_one_minus_alpha_hats = self.time_step_stackings[stacking_step][1]
+        self.sqrt_alpha_hats = self.time_step_stackings[stacking_level][0]
+        self.sqrt_one_minus_alpha_hats = self.time_step_stackings[stacking_level][1]
 
         if len(sequence_tensor.shape) == 3:
             # If the input is a 3D tensor, we need to add a batch dimension

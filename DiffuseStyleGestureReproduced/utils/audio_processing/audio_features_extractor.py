@@ -197,38 +197,14 @@ class AudioFeaturesExtractor:
         
         return current_features, valid_frames
     
-    def get_feature_buffers(self):
-        # Determine how many frames are valid
-        valid_frames = min(self.frames_processed, self.context_frames)
-        
-        if valid_frames == 0:
-            return None
-        
-        # Return only the valid portion (rightmost frames are newest)
-        start_idx = self.context_frames - valid_frames
-        
-        return {
-            'mel_spec': self.mel_spec_buffer[start_idx:],
-            'mfcc': self.mfcc_buffer[start_idx:],
-            'rms_energy': self.rms_energy_buffer[start_idx:],
-            'pitch': self.pitch_buffer[start_idx:],
-            'energy_derivatives': self.energy_derivatives_buffer[start_idx:],
-            'pitch_derivatives': self.pitch_derivatives_buffer[start_idx:],
-            'onsets': self.onsets_buffer[start_idx:]
-        }
-    
     def get_concatenated_features(self):
-        feature_dict = self.get_feature_buffers()
-        if feature_dict is None:
-            return None
-        
         # Concatenate all features along feature dimension
         return torch.cat([
-            feature_dict['mel_spec'],
-            feature_dict['mfcc'],
-            feature_dict['rms_energy'],
-            feature_dict['pitch'],
-            feature_dict['energy_derivatives'],
-            feature_dict['pitch_derivatives'],
-            feature_dict['onsets']
+            self.mel_spec_buffer,
+            self.mfcc_buffer,
+            self.rms_energy_buffer,
+            self.pitch_buffer,
+            self.energy_derivatives_buffer,
+            self.pitch_derivatives_buffer,
+            self.onsets_buffer
         ], dim=1)
