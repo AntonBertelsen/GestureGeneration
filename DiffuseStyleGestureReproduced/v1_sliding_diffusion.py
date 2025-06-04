@@ -2,11 +2,9 @@ import torch
 from typing import Union
 import math
 from typing import Callable
-from WnB_trackable import WnBTrackable
-
+from utils.WnB_trackable import WnBTrackable
 
 class Diffusion(WnBTrackable):
-
 
     def __init__(self, 
                  device: str,
@@ -19,7 +17,6 @@ class Diffusion(WnBTrackable):
         # OBS: 
         # number of deffusion steps for each frame is definded by num_of_timestep_frames * num_of_timestep_stackings
 
-
         self.device = device
         self.num_of_pre_timestep_frames = num_of_pre_timestep_frames
         self.num_of_timestep_frames = num_of_timestep_frames
@@ -31,7 +28,6 @@ class Diffusion(WnBTrackable):
 
         # This is a dictionary with the hyperparameters used for W&B tracking
         self.noise_schedule_hyper_params: dict[str, Union[str, int, float, bool]] = noise_schedule[1] 
-
 
         # In order to train faster we want to be able to jump to any level of noise at any time.
         # To do this, we precalculate the amount of noise that would have been added at any timestep. This means adding up noise
@@ -83,9 +79,6 @@ class Diffusion(WnBTrackable):
 
 
         # print("self.time_step_stackings", self.time_step_stackings)
-
-        
-
 
     def forward(self, sequence_tensor: torch.Tensor, stacking_level = 0) -> torch.Tensor:
 
@@ -172,19 +165,6 @@ class Diffusion(WnBTrackable):
         return (quadratic_schedule, {"name": "quadratic_schedule", "beta_min": beta_min, "beta_max": beta_max})
     
     @staticmethod
-    def cosine_schedule(s = 0.008) -> Callable[[int, int], float]:
-        # 's' is the hyperparam of the cosine - its described as a 'Small offset for stability'.
-
-        # This is a smooth cosine-shaped increase of the variance. 
-        # Pro: Improves sample quality, and is more stable than linear and quadratic
-        # Con: Needs hyperparameter tuning
-
-        def cosine_schedule(t: int, T: int):
-            return math.cos((t / T + s) / (1 + s) * (math.pi / 2)) ** 2
-
-        return (cosine_schedule, {"name": "cosine_schedule", "s": s})
-    
-    @staticmethod
     def exponential_schedule(beta_min = 0.0001, beta_max = 0.02) -> Callable[[int, int], float]:
         # 'beta' is the hyperparams of the exponentaial schedual.
         # Typical beta values are 0.0001 and 0.02, and they are used to control the rate of exponental decay of the variance.
@@ -215,6 +195,6 @@ class Diffusion(WnBTrackable):
             "num_of_timestep_frames": self.num_of_timestep_frames,
             "num_of_post_timestep_frames": self.num_of_post_timestep_frames,
             "num_of_timestep_stackings": self.num_of_timestep_stackings,
-            "number_of_deffusion_steps_for_each_frame": self.num_of_timestep_frames * self.num_of_timestep_stackings,
+            "number_of_diffusion_steps_for_each_frame": self.num_of_timestep_frames * self.num_of_timestep_stackings,
             **self.noise_schedule_hyper_params,
         }

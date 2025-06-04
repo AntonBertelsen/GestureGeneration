@@ -1,62 +1,88 @@
 import torch
 import torch.nn as nn
+from torch.amp import autocast
 from local_attention import transformer
 from local_attention.rotary import SinusoidalEmbeddings, apply_rotary_pos_emb
 from typing import Union
-import numpy as np
-
+from utils.WnB_trackable import WnBTrackable
+from utils.durationAdjuster import DurationAdjuster
 from v1_sliding_diffusion import Diffusion
-from debugger import Debugger, Show
+from pose_encoder.pose_encoder import PoseEncoder
+from utils.debugger import Debugger, Show
+import utils.utils as utils
 
-
-class ContinuousMotionModel(nn.Module):
+class ContinuousMotionModel(nn.Module, WnBTrackable):
     def __init__(self, 
-                device,
                 n_gesture_length: int,                      # Length of the sequence snippets to generate. We geneate in autoregressive manner, where we are constantly generating small chunks continously
-                diffusion_noise_scheduler: Diffusion,
-                number_of_styles: int,                      # Number of unique styles. In this context this is the number of speakers, since we treat each speaker as a style 
                 audio_features_per_frame: int,              # Number of audio features per frame. This is a mixture of prosodic features, onsets, wavlm, etc.
-                pose_features_per_frame: int, 
-                number_of_attention_heads: int = 8,
-                 
-                debugger: Debugger = Debugger(False)):      # Number of pose features per frame. These are the rotations / translations of the bones in the character skeleton. We may not pay attention to every channel for every bone, or every bone. 
+                pose_features_per_frame: int,               # Number of pose features per frame. These are the rotations / translations of the bones in the character skeleton. We may not pay attention to every channel for every bone, or every bone. 
+                number_of_styles: int,                      # Number of unique styles. In this context this is the number of speakers, since we treat each speaker as a style 
+                diffusion: Diffusion,                       # Diffusion model to use for the model. This is used to generate the sequence snippets in an autoregressive manner.
+                condition_mask_probabilty = 0.1,            # Probability of masking the style and audio features. This is used to condition the model on the style and audio features. The original paper uses 0.1, but we can experiment with this.
+                number_of_attention_heads: int = 8,         # Number of attention heads to use in the local attention layer. The original paper uses 8, but we can experiment with this.
+                pose_encoder: PoseEncoder = None,           # Autoencoder model to use for encoding the gesture sequence to a lower dimensional space. This is used to reduce the dimensionality of the input sequence.
+                predict_full_duration: bool = True,         # If True, the model will predict the full duration of the gesture sequence. If False, it will predict only the noised frames at the end of the sequence.
+                debugger: Debugger = Debugger(False),       # Debugger to use for debugging the model. This is used to capture and display information about the model during training and inference.
+                device = utils.get_device()
+            ):
         super().__init__()
 
         self.hyperparameter_dict_to_WnB_tracking = {
             "n_gesture_length": n_gesture_length,
-            "number_of_styles": number_of_styles,
             "audio_features_per_frame": audio_features_per_frame,
             "pose_features_per_frame": pose_features_per_frame,
+            "number_of_styles": number_of_styles,
+            "diffusion": diffusion.get_WnB_config_specs(),
+            "condition_mask_probabilty": condition_mask_probabilty,
             "number_of_attention_heads": number_of_attention_heads,
+            "predict_full_duration": predict_full_duration,
+            "pose_encoder": pose_encoder.get_WnB_config_specs() if pose_encoder is not None else None,
+            "device": device,
         }
 
-        self.device = device
+        self.n_gesture_length = n_gesture_length
+        self.audio_features_per_frame = audio_features_per_frame
+        self.pose_features_per_frame = pose_features_per_frame
+        self.number_of_styles = number_of_styles
+        self.diffusion = diffusion
+        self.condition_mask_probabilty = condition_mask_probabilty
+        self.number_of_attention_heads = number_of_attention_heads
+        self.pose_encoder = pose_encoder
+        self.predict_full_duration = predict_full_duration
         self.debugger = debugger
-        self.diffusion_noise_scheduler = diffusion_noise_scheduler
+        self.device = device
 
         # Parameter from the diffusion model:
-        self.max_timestep_stacking_level = diffusion_noise_scheduler.num_of_timestep_stackings
+        self.max_timestep_stacking_level = diffusion.num_of_timestep_stackings
 
-        self.num_of_pre_timestep_frames = diffusion_noise_scheduler.num_of_pre_timestep_frames
-        self.num_of_timestep_frames = diffusion_noise_scheduler.num_of_timestep_frames
-        self.num_of_post_timestep_frames = diffusion_noise_scheduler.num_of_post_timestep_frames
+        self.num_of_pre_timestep_frames = diffusion.num_of_pre_timestep_frames
+        self.num_of_timestep_frames = diffusion.num_of_timestep_frames
+        self.num_of_post_timestep_frames = diffusion.num_of_post_timestep_frames
 
-        self.pose_features_per_frame = pose_features_per_frame 
+        self.pose_features_per_frame = pose_features_per_frame
 
-        self.n_gesture_length = n_gesture_length
+        # If an pose encoder model is provided, we will use it to encode the gesture sequence before passing it to the main model.
+        # We use a b-VAE. This is extremely effective for reducing the dimensionality of the data. Moreover, it constructs a latent space
+        # that is highly gaussian, which should be beneficial for the diffusion model.
+        # If the pose encoder model is not provided, we will simply use the gesture sequence as is.
+        if pose_encoder is not None:
+            # Lock the weights of the autoencoder model since it is already trained.
+            for param in pose_encoder.parameters():
+                param.requires_grad = False
+            pose_encoder.eval()
 
-        # TODO: This seems wrong, can't we just apply the error message to assert?
-        try:
-            assert (self.num_of_pre_timestep_frames +
-                    self.num_of_timestep_frames +
-                    self.num_of_post_timestep_frames == self.n_gesture_length)
-        except AssertionError:
-            print("Assertion failed!")
-            print("Pre:", self.num_of_pre_timestep_frames,
-                "Timestep:", self.num_of_timestep_frames,
-                "Post:", self.num_of_post_timestep_frames,
-                "Total Expected:", self.n_gesture_length)
-            raise
+        if not self.predict_full_duration:
+            self.duration_adjuster = DurationAdjuster(
+                input_length=self.n_gesture_length,
+                target_length=self.num_of_timestep_frames
+            )
+
+        assert (self.num_of_pre_timestep_frames +
+            self.num_of_timestep_frames +
+            self.num_of_post_timestep_frames == self.n_gesture_length), (
+            f"Sum of pre ({self.num_of_pre_timestep_frames}), timestep ({self.num_of_timestep_frames}), "
+            f"and post ({self.num_of_post_timestep_frames}) frames must equal n_gesture_length ({self.n_gesture_length})"
+        )
         
         self.number_of_attention_heads = number_of_attention_heads
 
@@ -215,7 +241,6 @@ class ContinuousMotionModel(nn.Module):
 
         # Final transformation, creating the output
         self.final_linear = nn.Linear(256, pose_features_per_frame)
-    
 
     def display_debug_info(self, display_debug_info: bool, filter_keys: Union[str, list[str]]):
         self.debugger = Debugger(on=display_debug_info, keys=filter_keys)
@@ -225,8 +250,7 @@ class ContinuousMotionModel(nn.Module):
                 time_step_stacking_level: int,
                 one_hot_style, 
                 audio_features, 
-                noisy_gesture_sequence,
-                condition_mask_probabilty = 0.1):
+                noisy_gesture_sequence):
 
         self.debugger.capture([  
             ("one_hot_style", one_hot_style), 
@@ -296,9 +320,10 @@ class ContinuousMotionModel(nn.Module):
 
         self.debugger.capture(("style after style_linear", style), [Show.MAX_MIN, Show.IMAGE, Show.SHAPE], keys="style")
 
-        # 1.2.2 - Mask the style if apply_random_mask_to_style is True
-        style_mask = torch.bernoulli(torch.full_like(style, 1 - condition_mask_probabilty))
-        style *= style_mask
+        # 1.2.2 - Mask the style
+        if self.training:
+            style_mask = torch.bernoulli(torch.full_like(style, 1 - self.condition_mask_probabilty))
+            style *= style_mask
 
         self.debugger.capture(("style after style_mask", style), [Show.MAX_MIN, Show.IMAGE], keys="style")
 
@@ -405,8 +430,47 @@ class ContinuousMotionModel(nn.Module):
         #       to get a tensor of shape (1141, N)
         output_tensor = self.final_linear(transformer_encoder_output)
         self.debugger.capture(("output_tensor", output_tensor), [Show.MAX_MIN, Show.IMAGE], keys="output_tensor")
+
+
+        # if not self.predict_full_duration:
+        #     # 4.1 - If we are not predicting the full duration, we need to adjust the duration of the output tensor
+        #     #       We use the DurationAdjuster to adjust the duration of the output tensor to match the number of frames in the sequence
+        #     output_tensor = self.duration_adjuster(output_tensor, self.num_of_timestep_frames)
+        #     self.debugger.capture(("output_tensor after duration adjustment", output_tensor), [Show.MAX_MIN, Show.IMAGE], keys="output_tensor_after_duration_adjustment")
+
         # 4 - Return the output of the liniear layer
         return output_tensor
+
+    def generate(self, gesture_sequence, audio_features, main_agent_id_one_hot, replace_frames: int = 0):
+        with autocast(device_type=self.device.type, dtype=torch.bfloat16):
+
+            # If the autoencoder model is provided, we use it to encode the gesture sequence to a lower
+            # dimensional latent space which is also more gaussian.
+            # This is to help the diffusion model learn a better representation of the data.
+            encoded_gesture_sequence = self.pose_encoder.encode(gesture_sequence) if self.pose_encoder is not None else gesture_sequence
+
+            # We diffuse the encoded gesture sequence to create a noisy starting point for the diffusion model.
+            # TODO: Currently the same time step stacking level is used for all the sequences in the batch. This might be bad? Not sure
+            time_step_stacking_level = torch.randint(0, self.diffusion.num_of_timestep_stackings, ())
+            noisy_gesture_sequence = self.diffusion.forward(encoded_gesture_sequence, time_step_stacking_level)
+
+            # Apply the model to denoise the noisy gesture sequence.
+            encoded_output = self.forward(
+                time_step_stacking_level    = time_step_stacking_level.item(),
+                one_hot_style               = main_agent_id_one_hot,
+                audio_features              = audio_features, 
+                noisy_gesture_sequence      = noisy_gesture_sequence
+            )
+
+            # if replace frames are provided, we replace the first frames of the output with the original gesture sequence
+            if replace_frames > 0:
+                # Ensure the replace_frames does not exceed the length of the gesture sequence
+                encoded_output[:, :replace_frames] = encoded_gesture_sequence[:, :replace_frames]
+
+            # If the autoencoder model is provided, we use it to decode the output
+            output = self.pose_encoder.decode(encoded_output) if self.pose_encoder is not None else encoded_output
+
+            return output, encoded_gesture_sequence, encoded_output, noisy_gesture_sequence
 
     # Functions for Weights & Biases tracking
     def add_hyperparameters_to_WnB_tracking(self, hyperparameter_dict: dict):
@@ -415,3 +479,72 @@ class ContinuousMotionModel(nn.Module):
 
     def get_WnB_config_specs(self):
         return self.hyperparameter_dict_to_WnB_tracking
+
+    def get_model_state(self):        
+        # return model configuration and weights together
+        return {
+            'state_dict': self.state_dict(),
+            'config': {
+                'general': self.hyperparameter_dict_to_WnB_tracking,
+                'diffusion': self.diffusion.get_WnB_config_specs(),
+                'pose_encoder': self.pose_encoder.get_WnB_config_specs() if self.pose_encoder else None,
+            }
+        }
+
+def load_model(model_checkpoint, device=None):
+    
+    # If a path is provided, load the model checkpoint from the file
+    if isinstance(model_checkpoint, str):
+        model_checkpoint = torch.load(model_checkpoint, map_location='cpu', weights_only=False)['model_state']
+
+    # Extract configuration
+    config = model_checkpoint['config']
+    
+    # Get diffusion noise schedule
+    schedule_name = config['diffusion']['name']
+    schedule_func = getattr(Diffusion, f"{schedule_name}", None)
+    noise_schedule = schedule_func(
+        config['diffusion']['beta_min'],
+        config['diffusion']['beta_max']
+    )
+    
+    # Create diffusion model
+    diffusion = Diffusion(
+        device                      = device,
+        num_of_pre_timestep_frames  = config['diffusion']['num_of_pre_timestep_frames'],
+        num_of_timestep_frames      = config['diffusion']['num_of_timestep_frames'],
+        num_of_post_timestep_frames = config['diffusion']['num_of_post_timestep_frames'],
+        noise_schedule              = noise_schedule,
+        num_of_timestep_stackings   = config['diffusion'].get('num_of_timestep_stackings', 1)
+    )
+    
+    # Create poe encoder if it was used
+    pose_encoder = None
+    if config['pose_encoder']:
+        pose_encoder = PoseEncoder(
+            z_dim       = config['pose_encoder'].get('z_dim', 48),
+            pose_dim    = config['pose_encoder'].get('pose_dim', 345),
+            device      = device
+        )
+    
+    # Create the main model
+    model = ContinuousMotionModel(
+        n_gesture_length            = config['general']['n_gesture_length'],
+        audio_features_per_frame    = config['general']['audio_features_per_frame'],
+        pose_features_per_frame     = config['general']['pose_features_per_frame'],
+        number_of_styles            = config['general']['number_of_styles'],
+        diffusion                   = diffusion,
+        condition_mask_probabilty   = config['general']['condition_mask_probabilty'],
+        number_of_attention_heads   = config['general']['number_of_attention_heads'],
+        predict_full_duration       = config['general']['predict_full_duration'],
+        pose_encoder                = pose_encoder,
+        device                      = device
+    )
+    
+    # Fix state_dict keys if compiled with torch.compile
+    state_dict = model_checkpoint['state_dict']
+    if any(key.startswith('_orig_mod.') for key in state_dict):
+        state_dict = {k.replace('_orig_mod.', ''): v for k, v in state_dict.items()}
+    
+    model.load_state_dict(state_dict)
+    return model

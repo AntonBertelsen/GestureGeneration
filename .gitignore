@@ -181,6 +181,8 @@ DiffuseStyleGestureReproduced/dataset/genea2023_dataset/trn/**/features/
 DiffuseStyleGestureReproduced/dataset/genea2023_dataset/*
 DiffuseStyleGestureReproduced/dataset/*
 
+DiffuseStyleGestureReproduced/dataset/wandb/
+
 
 # Ignore everything inside debug_files/
 DiffuseStyleGestureReproduced/debug_files/*
@@ -191,12 +193,8 @@ DiffuseStyleGestureReproduced/bvh_testsfeatures/*
 DiffuseStyleGestureReproduced/bvh_tests/bvh/*
 
 
-# Landscape for diffusion test
-DiffuseStyleGestureReproduced/dataset/landscape
-
-data_pipe.sav
-
-
-
 .DS_Store
 DiffuseStyleGestureReproduced/dataset/genea2023_dataset/trn/main-agent/features/trn_2023_v0_000.npz
+
+DiffuseStyleGestureReproduced/v1_models/
+DiffuseStyleGestureReproduced/pose_encoder/models/

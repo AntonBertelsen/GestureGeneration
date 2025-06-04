@@ -4,14 +4,12 @@ import torch.nn.functional as F
 import torchaudio
 from torchaudio.transforms import MelSpectrogram, MFCC
 from utils.audio_processing.prosody_features import RMS, Pitch
-
 from transformers import WavLMModel, Wav2Vec2FeatureExtractor
+import utils.utils as utils
 
 def extract_audio_features(audio_file):
 
-    device = torch.device("cuda" if torch.cuda.is_available() else 
-                        "mps" if torch.backends.mps.is_available() else 
-                        "cpu")
+    device = utils.get_device()
 
     # Load audio file (with `torchaudio`)
     waveform, wav_sample_rate = torchaudio.load(audio_file, normalize=True)
@@ -53,18 +51,6 @@ def extract_audio_features(audio_file):
     pitch_derivatives = pitch_derivatives[:min_length, :]
     onsets = onsets[:min_length, :]
     # wavlm_features = wavlm_features[:min_length, :]
-
-    # Concatenate features along the feature dimension
-    # audio_features = torch.cat([
-    #     mel_spec,
-    #     mfcc,
-    #     rms_energy,
-    #     energy_derivatives,
-    #     pitch,
-    #     pitch_derivatives,
-    #     onsets,
-    #     wavlm_features
-    # ], dim=1)
     
     # return mel_spec, mfcc, rms_energy, pitch, energy_derivatives, pitch_derivatives, onsets, wavlm_features
     return mel_spec, mfcc, rms_energy, pitch, energy_derivatives, pitch_derivatives, onsets

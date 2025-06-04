@@ -44,8 +44,6 @@ class RMS(torch.nn.Module):
         # Compute RMS: mean over frame_length, then sqrt
         rms = torch.sqrt(torch.mean(patches, dim=1) + self.eps)  # shape: (channels, num_frames)
         return rms
-    
-
 
 # This pitch calculation uses torchaudio's detect_pitch_frequency function.
 # One problem is that it uses some kind of time thing that is not the same as the hop_length.

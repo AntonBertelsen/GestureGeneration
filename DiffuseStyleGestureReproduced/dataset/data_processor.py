@@ -3,11 +3,10 @@ import os
 import csv
 import pickle
 from tqdm import tqdm
-from utils.bvh_processing.bvh_converter import BVHParser
+from utils.animation.processing.bvh_converter import BVHParser
 from utils.audio_processing.extract_audio_features import extract_audio_features
 import yaml
 import argparse
-import torch
 
 class DataProcessor:
     def __init__(self, bvh_dir, wav_dir, metadata_file, output_dir, skeleton_config_file):
@@ -328,24 +327,8 @@ class DataProcessor:
             world_pos_gestures=world_pos_gestures,
             audio=audio_features,
             speakers=np.array(speaker_data)
-            # mel_spec=mel_spec,
-            # mfcc=mfcc,
-            # rms_energy=rms_energy,
-            # pitch=pitch,
-            # energy_derivatives=energy_derivatives,
-            # pitch_derivatives=pitch_derivatives,
-            # onsets=onsets,
-            # wavlm_features=wavlm_features,
-            # mean_pose=mean_pose,
-            # std_pose=std_pose
         )
-        # Also save mean and std separately
-        # np.savez_compressed(
-        #     os.path.join(self.output_dir, "statistics.npz"),
-        #     mean_pose=mean_pose,
-        #     std_pose=std_pose
-        # )
-        
+
         # Save metadata separately
         meta_file = os.path.join(self.output_dir, "consolidated_meta.pkl")
         with open(meta_file, 'wb') as f:

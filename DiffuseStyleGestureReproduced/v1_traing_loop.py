@@ -1,3 +1,4 @@
+import os
 import torch
 import torch.nn as nn
 import numpy as np
@@ -6,13 +7,12 @@ from torch.amp import autocast
 from tqdm import tqdm
 import time
 import v1_evaluation
-import os
 from IPython.display import clear_output
-from v1_sliding_diffusion import Diffusion
-from v1_model import ContinuousMotionModel
+from v1_model import ContinuousMotionModel, load_model
 from torch.utils.data import DataLoader
-from variational_autoencoder import VAE
+from utils.utils import get_latest_model_path
 import wandb
+import yaml
 
 def train(
         experiment_collection_name: str, # Name of the gruope of experiments, this run is a part of
@@ -20,13 +20,11 @@ def train(
         model: ContinuousMotionModel,
         training_loader: DataLoader,
         val_loader: DataLoader, 
-        num_epochs: int, 
-        autoencoder_model: VAE = None,
+        num_epochs: int,
         run = None, # A wandb.run object to log the training process
         wandb_config: dict = None, # A wandb.config from a yml or dict. This is logged hyper parameters for wandb used for hyperparameter tuning / sweeps. Given to be attached to the run, and extended with given, but not sweeping hyperparams
         model_checkpoint_dir: str = None, # dir of the model checkpoint to load from
         upload_model_check_point: bool = False, # should upload the model checkpoint to wandb
-        condition_mask_probabilty = 0.1,  # TODO: should be in model, as hyper param, not here
         learning_rate = 0.0003,
         reconstruction_loss_weight = 1.0, # Weight for the reconstruction loss
         variance_loss_weight = 0.1,
@@ -34,39 +32,96 @@ def train(
         acceleration_loss_weight = 0.1,
         latent_space_loss_weight = 2.0,
         category_weighting: dict[str, float] = {},
-        visualize_step: int = 200, # How often to print profiling stats,
-        save_step: int = 1000 # How often to save the model checkpoint
+        frame_weighting_segments_info: list[(float, float, float)] = [], # This is a list of tuples, where each tuple contains the start and end of a segment, and the end frame of the segment. This is used to create a frame weighting vector that weights the loss for each frame. Since we are essentially doing infill diffusion, we want to bias the the loss for the frames that are not masked out.
+        visualize_step: int = 200, # How often to print profiling stats
+        continue_from_checkpoint: str = None # Path to a checkpoint to continue training from. If provided, the model will be loaded from this checkpoint and training will continue from there.
     ):
 
-    current_model_name = f"{experiment_collection_name}_started_{time.strftime('%Y-%m-%d_%H-%M-%S')}"
+    current_model_name = f"{experiment_collection_name}_{time.strftime('%Y-%m-%d_%H-%M-%S')}"
 
-    diffusion: Diffusion = model.diffusion_noise_scheduler
+    # dictionaries to keep track of the losses during training and validation so we can plot them later.
+    # The first element of the tuple is all losses, the second element is the averaged loss over the last visualize_step.
+    train_loss_rec = {'loss':                       ([],[]),
+                      'reconstruction_loss':        ([],[]), 
+                      'encoded_latent_space_loss':  ([],[]), 
+                      'variance_loss':              ([],[]), 
+                      'velocity_loss':              ([],[]), 
+                      'acceleration_loss':          ([],[]),
+                      'epoch_loss':                 ([],[])}
+    
+    val_loss_rec = {'loss':                         ([],[]),
+                    'reconstruction_loss':          ([],[]),
+                    'encoded_latent_space_loss':    ([],[]), 
+                    'variance_loss':                ([],[]), 
+                    'velocity_loss':                ([],[]), 
+                    'acceleration_loss':            ([],[])}
+                    
+    frechet_distance_rec = {'encoded':              [], 
+                            'raw':                  []}
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
     torch.set_float32_matmul_precision('high')
     
+    hyper_parameters = {
+        "experiment_collection_name": experiment_collection_name,
+        "device": device.type,
+        "model_name": current_model_name,
+        "num_epochs": num_epochs,
+        "learning_rate": learning_rate,
+        "reconstruction_loss_weight": reconstruction_loss_weight,
+        "variance_loss_weight": variance_loss_weight,
+        "velocity_loss_weight": velocity_loss_weight,
+        "acceleration_loss_weight": acceleration_loss_weight,
+        "latent_space_loss_weight": latent_space_loss_weight,
+        "category_weighting": category_weighting,
+        "frame_weighting_segments_info": frame_weighting_segments_info,
+        "batch_size": training_loader.dataset.batch_size,
+        "dataset_type": training_loader.dataset.__class__.__name__,
+        "model": model.get_WnB_config_specs()
+    }
     # If the wandb_config is provided, I update it with the hyper parameters of the model and training process.
     # This is to ensure that the hyper parameters are logged to wandb (W&B) for tracking and visualization.
     # Doing it in this way also allows us to use configs for hyperparameter sweeps.
     if wandb_config is not None:
-        wandb_config.update({
-            # Training hyper parameters
-            "batch_size": training_loader.batch_size,
-            "epochs": num_epochs,
-            "optimizer": optimizer.__class__.__name__,
-            "velocity_loss_weight": velocity_loss_weight,
-            "acceleration_loss_weight": acceleration_loss_weight,
+        wandb_config.update(hyper_parameters, allow_val_change=True)  # <- Important: allows adding/updating keys
 
-            # Data hyper params:
-            "dataset_type": training_loader.__class__.__name__,
+    # bone_category_weigthing data used to weight bones differently in the loss function based on assigned category weightings.
+    bone_category_weighting = training_loader.dataset.skeleton.construct_bone_weighting_vector(category_weighting)
+    
+    # frame weighting vector used to weight the loss for each frame based on the segments info provided.
+    frame_weighting = construct_frame_weighting_vector(frame_weighting_segments_info) if frame_weighting_segments_info else None
 
-            # Noising hyper parameters
-            **model.diffusion_noise_scheduler.get_WnB_config_specs(),
+    # Initialize start_epoch to 0 (will be updated if loading from checkpoint)
+    start_epoch = 0
 
-            # training_loader hyper parameters
-            **model.get_WnB_config_specs(),
-        }, allow_val_change=True)  # <- Important: allows adding/updating keys
+    # If a model checkpoint directory is provided we load the model from the checkpoint.
+    if model_checkpoint_dir is not None and continue_from_checkpoint is not None:
+        
+        # If the continue_from_checkpoint is "latest", we find the latest checkpoint in the model_checkpoint_dir (otherwise we use the provided path).
+        if continue_from_checkpoint == "latest":
+            continue_from_checkpoint, checkpoint_folder = get_latest_model_path(model_checkpoint_dir, return_folder = True)
 
+        print (f"Continuing training from checkpoint: {continue_from_checkpoint}")
+
+        # Load the model from the checkpoint
+        model, reached_epoch = resume_training_from_checkpoint(
+            optimizer               = optimizer,
+            train_loss_rec          = train_loss_rec,
+            val_loss_rec            = val_loss_rec,
+            frechet_distance_rec    = frechet_distance_rec,
+            checkpoint_path         = continue_from_checkpoint,
+            device                  = device
+        )
+
+        start_epoch = reached_epoch + 1  # Start from the next epoch after the checkpoint
+        print(f"Resuming training from epoch {start_epoch}...")
+
+        # Update the current model name to reflect that we are continuing from a checkpoint
+        current_model_name = checkpoint_folder
+
+        # Update the hyper parameters with the model's configuration and the checkpoint path.
+        hyper_parameters['continue_from_checkpoint'] = continue_from_checkpoint
+        hyper_parameters['model'] = model.get_WnB_config_specs()
 
     # I then move the model to the device that is being used and put in traning mode
     model = model.to(device)
@@ -74,60 +129,27 @@ def train(
     # We compile the model using cudagraphs for performance optimization.
     # This is a PyTorch feature that allows us to optimize the model for faster training.
     # Note: cudagraphs is only available on CUDA devices, so we check if the device is CUDA.
-    # There are other backends available, but cudagraphs is the only one I could get working on windows.
+    # There are other backends available, but cudagraphs is the only one I could get working on Windows.
     # In Andrej Kaparthy's gpt video he uses a different backend.
     if device.type == 'cuda':
         model = torch.compile(model, backend="cudagraphs")
-    
-    # dictionaries to keep track of the losses during training and validation so we can plot them later.
-    # The first element of the tuple is all losses, the second element is the averaged loss over the last visualize_step.
-    train_loss_rec = {'loss' :                      ([],[]),
-                      'reconstruction_loss' :       ([],[]), 
-                      'encoded_latent_space_loss' : ([],[]), 
-                      'variance_loss' :             ([],[]), 
-                      'velocity_loss' :             ([],[]), 
-                      'acceleration_loss' :         ([],[]),
-                      'epoch_loss' :                ([],[])}
-    
-    val_loss_rec = {'loss' :                        ([],[]),
-                    'reconstruction_loss' :         ([],[]),
-                    'encoded_latent_space_loss' :   ([],[]), 
-                    'variance_loss' :               ([],[]), 
-                    'velocity_loss' :               ([],[]), 
-                    'acceleration_loss' :           ([],[])}
-                    
-    frechet_distance_rec = {'encoded':              [], 
-                            'raw':                  []}
-
-    # bone_category_weigthing data used to weight bones differently in the loss function based on assigned category weightings.
-    bone_category_weighting = training_loader.dataset.skeleton.construct_bone_weighting_vector(category_weighting)
-    
-    # If an autoencoder model is provided, we will use it to encode the gesture sequence before passing it to the main model.
-    # This is extremely effective for reducing the dimensionality of the data. Moreover, it constructs a latent space
-    # that is highly gaussian, which should be beneficial for the diffusion model.
-    # If the autoencoder model is not provided, we will simply use the gesture sequence as is.
-    if autoencoder_model is not None:
-        # Lock the weights of the autoencoder model, since we are simply using it to reduce the dimensionality of the data, 
-        # and it is already trained. We dont want to change it.
-        for param in autoencoder_model.parameters():
-            param.requires_grad = False
-        
-        autoencoder_model = autoencoder_model.to(device)
-        autoencoder_model.eval()
 
     # Main training loop, where we iterate over the number of epochs and the training data.
-    for epoch in range(num_epochs):
+    for epoch in range(start_epoch, num_epochs):
         # I set the model to training mode
         model.train()
 
         # reshuffle the dataset from the dataloaders at the start of each epoch.
-        training_loader.dataset._reshuffle()
-        val_loader.dataset._reshuffle()
+        training_loader.dataset.reshuffle()
+        val_loader.dataset.reshuffle()
 
         # During the epoch, all the data items are iterated over.        
         progress_bar = tqdm(training_loader, desc=f'Epoch {epoch+1}/{num_epochs}', leave=True)
         for i, batch_data in enumerate(progress_bar):
             
+            # Zero gradients before forward pass
+            optimizer.zero_grad()
+
             # We are using our own batching mechanism in the dataset to to avoid having to use a collate function.
             # As such, each item contains a full batch, but we need to handle the extra dimension 
             # from batch_size=1 from the dataloader.
@@ -135,31 +157,12 @@ def train(
                 item.squeeze(0).to(device) for item in batch_data
             ]
 
-            # If the autoencoder model is provided, we use it to encode the gesture sequence to a lower
-            # dimensional latent space which is also more gaussian.
-            # This is to help the diffusion model learn a better representation of the data.
-            encoded_gesture_sequence = encode_gesture_sequence(autoencoder_model,gesture_sequence)
-
-            # We diffuse the encoded gesture sequence to create a noisy starting point for the diffusion model.
-            # TODO: Currently the same time step stacking level is used for all the sequences in the batch. This might be bad? Not sure
-            time_step_stacking_level = torch.randint(0, diffusion.num_of_timestep_stackings, ())
-            noisy_gesture_sequence = diffusion.forward(encoded_gesture_sequence, time_step_stacking_level)
-
-            # Zero gradients before forward pass
-            optimizer.zero_grad()
-
-            # Apply the model to denoise the noisy gesture sequence.
-            with autocast(device_type=device.type, dtype=torch.bfloat16):
-                encoded_output = model(
-                    time_step_stacking_level    = time_step_stacking_level.item(),
-                    one_hot_style               = main_agent_id_one_hot,
-                    audio_features              = audio_features, 
-                    noisy_gesture_sequence      = noisy_gesture_sequence,
-                    condition_mask_probabilty   = condition_mask_probabilty,
-                )
-
-            # If the autoencoder model is provided, we use it to decode the output
-            output = decode_gesture_sequence(autoencoder_model, encoded_output)
+            output, encoded_gesture_sequence, encoded_output, noisy_gesture_sequence = model.generate(
+                gesture_sequence            = gesture_sequence,
+                audio_features              = audio_features,
+                main_agent_id_one_hot       = main_agent_id_one_hot,
+                replace_frames              = 0 if model.predict_full_duration else model.num_of_pre_timestep_frames
+            )
 
             # Perform loss calculations.
             total_loss = calculate_loss(
@@ -173,7 +176,7 @@ def train(
                 velocity_loss_weight        = velocity_loss_weight,
                 acceleration_loss_weight    = acceleration_loss_weight,
                 bone_weighting_vector       = bone_category_weighting,
-                frame_weighting_vector      = None,
+                frame_weighting_vector      = frame_weighting,
                 loss_recorder               = train_loss_rec
             )
 
@@ -184,13 +187,10 @@ def train(
             optimizer.step()
 
             # Update the progress bar with the current loss
-            progress_bar.set_postfix({'training loss': total_loss.item()})
-
-            # log the loss to wandb (W&B)
-            if run is not None: 
-                step = i + epoch * len(training_loader)
-                run.log({"train/loss": total_loss.item()}, step=step)
-
+            progress_bar.set_postfix({f"\033[91mTraining loss": f"{total_loss.item()}\033[0m", 
+                                      f"\033[92mLast epoch loss": f"{train_loss_rec['epoch_loss'][0][-1] if train_loss_rec['epoch_loss'][0] else 0}\033[0m",
+                                      f"\033[94mFrechet distance": f"{frechet_distance_rec['encoded'][-1] if frechet_distance_rec['encoded'] else 0}\033[0m"})
+            
             # Visualization
             if i % visualize_step == 0:
                 visualize_training_progress(
@@ -199,28 +199,30 @@ def train(
                     encoded_gesture_sequence            = encoded_gesture_sequence,
                     encoded_denoised_gesture_sequence   = encoded_output,
                     noisy_gesture_sequence              = noisy_gesture_sequence,
-                    using_autoencoder                   = autoencoder_model is not None,
+                    using_pose_encoder                  = model.pose_encoder is not None,
                     train_loss_rec                      = train_loss_rec,
                     val_loss_rec                        = val_loss_rec,
                     frechet_distance_rec                = frechet_distance_rec,
-                    visualize_step                      = visualize_step
-                )
-
-            # Saving
-            if i % save_step == 0:
-                save_model_checkpoint(
-                    model           = model,
-                    checkpoint_dir  = model_checkpoint_dir,
-                    model_name      = current_model_name,
-                    epoch           = epoch,
-                    step            = i,
-                    upload          = upload_model_check_point,
-                    run             = run
-                )
-        
+                    visualize_step                      = visualize_step,
+                    frame_weighting                     = frame_weighting
+                )        
         ########################################################################
         # End of epoch
         ########################################################################
+
+        save_model_checkpoint(
+            model                   = model,
+            checkpoint_dir          = model_checkpoint_dir,
+            model_name              = current_model_name,
+            epoch                   = epoch,
+            hyper_parameters        = hyper_parameters,
+            optimizer               = optimizer,
+            train_loss_rec          = train_loss_rec,
+            val_loss_rec            = val_loss_rec,
+            frechet_distance_rec    = frechet_distance_rec,
+            upload                  = upload_model_check_point,
+            run                     = run
+        )
 
         epoch_length = len(training_loader)
         train_loss_rec['epoch_loss'][0].append(np.mean(train_loss_rec['loss'][0][-epoch_length:]))
@@ -228,22 +230,20 @@ def train(
         # At the end of the epoch, we evaluate the model on the validation set.
         model.eval()
         
-        val_loss = 0
-
         # We calculate the Frechet distance between the generated and true gestures.
         # This is a measure of how similar the distribution of the generated gestures is to the distribution of the true gestures.
-        frechet_distance, frechet_distance_raw_features, = v1_evaluation.evaluate_frechet_gesture_distance(
+        frechet_distance, _, = v1_evaluation.evaluate_frechet_gesture_distance(
             model             = model,
             val_loader        = val_loader,
             device            = device,
-            autoencoder_model = autoencoder_model,
             evaluation_length = 30,
-            num_samples       = 100
+            num_samples       = 64,
+            calculate_raw_frechet_distance = False
         )
 
         # Log the Frechet distance so we can see how it changes over time.
         frechet_distance_rec['encoded'].append(frechet_distance)
-        frechet_distance_rec['raw'].append(frechet_distance_raw_features)
+        # frechet_distance_rec['raw'].append(frechet_distance_raw_features)
 
         # We run the model on the validation set to calculate the validation loss.
         with torch.no_grad():
@@ -252,26 +252,12 @@ def train(
                 gesture_sequence, _, audio_features, main_agent_id_one_hot = [
                     item.squeeze(0).to(device) for item in val_batch
                 ]
-                # If the autoencoder model is provided, we use it to encode the gesture sequence to a lower
-                # dimensional latent space which is also more gaussian.
-                encoded_gesture_sequence = encode_gesture_sequence(autoencoder_model, gesture_sequence)
-
-                # We diffuse the encoded gesture sequence to create a noisy starting point for the diffusion model.
-                time_step_stacking_level = torch.randint(0, diffusion.num_of_timestep_stackings, (1,))
-                noisy_gesture_sequence = diffusion.forward(encoded_gesture_sequence, time_step_stacking_level)
-
-                # Apply the model to denoise the noisy gesture sequence.
-                with autocast(device_type=device.type, dtype=torch.bfloat16):
-                    encoded_output = model(
-                        time_step_stacking_level    = time_step_stacking_level.item(),
-                        one_hot_style               = main_agent_id_one_hot,
-                        audio_features              = audio_features, 
-                        noisy_gesture_sequence      = noisy_gesture_sequence,
-                        condition_mask_probabilty   = condition_mask_probabilty,
-                    )
-
-                # If the autoencoder model is provided, we use it to decode the output
-                output = decode_gesture_sequence(autoencoder_model, encoded_output)
+                
+                output, encoded_gesture_sequence, encoded_output, noisy_gesture_sequence = model.generate(
+                    gesture_sequence            = gesture_sequence,
+                    audio_features              = audio_features,
+                    main_agent_id_one_hot       = main_agent_id_one_hot
+                )
 
                 # Perform loss calculations.
                 total_loss = calculate_loss(
@@ -285,41 +271,38 @@ def train(
                     velocity_loss_weight        = velocity_loss_weight,
                     acceleration_loss_weight    = acceleration_loss_weight,
                     bone_weighting_vector       = bone_category_weighting,
-                    frame_weighting_vector      = None,
+                    frame_weighting_vector      = frame_weighting,
                     loss_recorder               = val_loss_rec
                 )
-            val_loss += total_loss.item()
-        # Log the average validation loss for the epoch.
         
         # Calculate averaged losses over the last validation 
         for key in val_loss_rec.keys():
             val_loss_rec[key][1].append(np.mean(train_loss_rec[key][0]))
             # clear the losses for the next epoch
             val_loss_rec[key][0].clear()
-        
-        # Log the losses to wandb (W&B) if a run is provided.
-        if run is not None: 
-            step = i + epoch * len(training_loader)
-            run.log({"val/loss": val_loss / len(val_loader)}, step=step)
 
     # close the wandb (W&B) run
     if run is not None: 
         run.finish() 
     
     # Save the final model checkpoint
-    save_model_checkpoint(
-        model=model,
-        checkpoint_dir=model_checkpoint_dir,
-        current_model_name=current_model_name + "_final",
-        epoch=num_epochs-1,
-        step=len(training_loader),
-        upload_model_check_point=upload_model_check_point,
-        run=run
+    save_model_checkpoint( 
+        model                   = model,
+        checkpoint_dir          = model_checkpoint_dir,
+        model_name              = current_model_name + "_final",
+        epoch                   = num_epochs-1,
+        step                    = len(training_loader),
+        hyper_parameters        = hyper_parameters,
+        optimizer               = optimizer,
+        train_loss_rec          = train_loss_rec,
+        val_loss_rec            = val_loss_rec,
+        frechet_distance_rec    = frechet_distance_rec,
+        upload                  = upload_model_check_point,
+        run                     = run
     )
 
     # Return the trained model
     return model
-
 
 # Full loss function that combines all the individual losses.
 def calculate_loss(pred, gt, 
@@ -331,15 +314,15 @@ def calculate_loss(pred, gt,
          acceleration_loss_weight,
          bone_weighting_vector, # This is a vector that weights the loss for each bone category.
          frame_weighting_vector, # This is a vector that weights the loss for each frame. Since we are essentially doing infill diffusion, we want to bias the the loss for the frames that are not masked out.
-         loss_recorder=None # This is a dictionary that keeps track of the losses during training and validation so we can plot them later.
-         ):
+         loss_recorder = None # This is a dictionary that keeps track of the losses during training and validation so we can plot them later.
+    ):
     device = pred.device
     with autocast(device_type=device.type, dtype=torch.bfloat16):
-                
-        # Use the casted target for all loss calculations
-        recon_l = nn.HuberLoss(reduction="none")(pred, gt) * reconstruction_loss_weight
 
-        encoded_latent_space_l = encoded_latent_space_loss(encoded_gt, encoded_pred) * latent_space_loss_weight
+        # Use the casted target for all loss calculations
+        recon_l = nn.HuberLoss(reduction="none")(pred, gt)# * reconstruction_loss_weight
+
+        encoded_latent_space_l = nn.HuberLoss(reduction="none")(encoded_gt, encoded_pred) * latent_space_loss_weight
         variance_l = variance_loss(pred, gt) * variance_loss_weight 
         velocity_l = velocity_loss(pred, gt) * velocity_loss_weight 
         acceleration_l = acceleration_loss(pred, gt) * acceleration_loss_weight
@@ -349,14 +332,16 @@ def calculate_loss(pred, gt,
         variance_l = bone_weighting_vector * variance_l
         velocity_l = bone_weighting_vector * velocity_l
         acceleration_l = bone_weighting_vector * acceleration_l
-        
-        # Apply the frame weighting vector
+
+        # Apply the frame weighting vector (Can't be applied to variance loss, since variance is calculated over time, and not per frame)
         if frame_weighting_vector is not None:
+            # Unsqueeze the frame weighting vector to match the shape of the losses
+            frame_weighting_vector = frame_weighting_vector.to(device).unsqueeze(0).unsqueeze(2)  # Shape: (1, num_frames, 1)
+            
             recon_l = frame_weighting_vector * recon_l
             encoded_latent_space_l = frame_weighting_vector * encoded_latent_space_l
-            variance_l = frame_weighting_vector * variance_l
-            velocity_l = frame_weighting_vector * velocity_l
-            acceleration_l = frame_weighting_vector * acceleration_l
+            velocity_l = frame_weighting_vector[:,:-1,:] * velocity_l # Velocity used finite difference to determine the derivative, so we need to remove the last frame for lengths to match
+            acceleration_l = frame_weighting_vector[:,:-2,:] * acceleration_l # Acceleration used finite difference to determine the second derivative, so we need to remove the last two frames for lengths to match
 
         # Now we find the mean over the batch and time dimensions
         recon_l = recon_l.mean()
@@ -407,23 +392,22 @@ def encoded_latent_space_loss(pred, gt):
     # calculate the loss between the encoded latent space and the predicted encoded latent space
     return (pred - gt) ** 2
 
-def encode_gesture_sequence(autoencoder_model, gesture_sequence):
-    device = gesture_sequence.device
-    if autoencoder_model is not None:
-        with autocast(device_type=device.type, dtype=torch.bfloat16):
-            encoded_gesture_sequence, _ = autoencoder_model.encode(gesture_sequence)
-        return encoded_gesture_sequence
-    else:
-        return gesture_sequence
-    
-def decode_gesture_sequence(autoencoder_model, encoded_gesture_sequence):
-    device = encoded_gesture_sequence.device
-    if autoencoder_model is not None:
-        with autocast(device_type=device.type, dtype=torch.bfloat16):
-            output = autoencoder_model.decode(encoded_gesture_sequence)
-        return output
-    else:
-        return encoded_gesture_sequence
+def construct_frame_weighting_vector(segments_info: list[(float, float, float)]):
+    segments = []
+    current_frame = 0
+    for idx, (start, end, end_frame) in enumerate(segments_info):
+        count = end_frame - current_frame + 1
+        assert count > 0, f"End frame cannot be less than the end frame of the previous segment"
+        segment = torch.linspace(start, end, count)
+        segment = segment[1:]  # avoid duplicate of endpoint
+        segments.append(segment)
+        current_frame = end_frame
+
+    frame_weighting_vector = torch.cat(segments)
+    # Normalize to average each number of frames to 1, so that the loss is not biased by the number of frames.
+    frame_weighting_vector = (frame_weighting_vector / frame_weighting_vector.sum()) * len(frame_weighting_vector)
+
+    return frame_weighting_vector
 
 def visualize_training_progress(
         full_gesture_sequence: torch.Tensor,
@@ -431,33 +415,30 @@ def visualize_training_progress(
         encoded_gesture_sequence: torch.Tensor,
         encoded_denoised_gesture_sequence: torch.Tensor,
         noisy_gesture_sequence: torch.Tensor,
-        using_autoencoder: bool,
+        using_pose_encoder: bool,
         train_loss_rec: dict,
         val_loss_rec: dict,
         frechet_distance_rec: dict,
         visualize_step: int,
+        frame_weighting: torch.Tensor = None
     ):
     
     clear_output(wait=True)
-    visualisation_start = time.time()
 
     # Calculate averaged losses over the last visualize_step and store in the loss records.
     for key in train_loss_rec.keys():
         train_loss_rec[key][1].append(np.mean(train_loss_rec[key][0][-visualize_step:]))
 
     # Create a single figure with GridSpec to manage all plots
-    # Calculate total rows needed: 3 rows + 1 if using autoencoder
-    total_rows = 3 + (1 if using_autoencoder else 0)
-    
     # Height ratios for each row
-    if using_autoencoder:
-        height_ratios = [4, 2, 8, 2]  # Loss plots, Frechet, Gesture viz, Latent space viz
+    if using_pose_encoder:
+        height_ratios = [4, 2, 8]  # Loss plots, Latent space viz, Gesture viz
     else:
-        height_ratios = [4, 2, 8]  # Loss plots, Frechet, Gesture viz
+        height_ratios = [4, 0, 8]  # Loss plots, Gesture viz
     
     # Create figure with appropriate height
-    fig = plt.figure(figsize=(30, 9 * total_rows))
-    gs = fig.add_gridspec(total_rows, 4, height_ratios=height_ratios)
+    fig = plt.figure(figsize=(30, 9 * 3))
+    gs = fig.add_gridspec(3, 4, height_ratios=height_ratios)
     
     # Add overall title
     fig.suptitle("Training Progress Visualization", fontsize=24)
@@ -470,10 +451,9 @@ def visualize_training_progress(
     ax_train.plot(train_loss_rec['variance_loss'][1], label='Variance Loss', color='orange')
     ax_train.plot(train_loss_rec['velocity_loss'][1], label='Velocity Loss', color='purple')
     ax_train.plot(train_loss_rec['acceleration_loss'][1], label='Acceleration Loss', color='brown')
-    ax_train.set_title('Losses over Training Steps')
+    ax_train.set_title('Losses over Training Steps', fontsize=20)
     ax_train.set_xlabel('Step')
     ax_train.set_ylabel('Loss')
-    # ax_train.set_yscale('log')
     ax_train.grid(True)
     ax_train.legend()
 
@@ -485,48 +465,74 @@ def visualize_training_progress(
     ax_val.plot(val_loss_rec['variance_loss'][1], label='Variance Loss', color='orange')
     ax_val.plot(val_loss_rec['velocity_loss'][1], label='Velocity Loss', color='purple')
     ax_val.plot(val_loss_rec['acceleration_loss'][1], label='Acceleration Loss', color='brown')
-    ax_val.set_title('Validation Losses over Training Steps')
+    ax_val.set_title('Validation Losses over Training Steps', fontsize=20)
     ax_val.set_xlabel('Step')
     ax_val.set_ylabel('Loss')
-    # ax_val.set_yscale('log')
     ax_val.grid(True)
     ax_val.legend()
 
     # Train vs Val loss
-    ax_comp = fig.add_subplot(gs[0, 2:4])
-    ax_comp.plot(train_loss_rec['loss'][1], label='Training Loss', color='blue')
+    ax_comp = fig.add_subplot(gs[0, 2])
+    ax_comp.plot(train_loss_rec['epoch_loss'][0], label='Training Loss', color='blue')
     ax_comp.plot(val_loss_rec['loss'][1], label='Validation Loss', color='orange')
-    ax_comp.set_title('Training vs Validation Loss')
+    ax_comp.set_title('Training vs Validation Loss', fontsize=20)
     ax_comp.set_xlabel('Step')
     ax_comp.set_ylabel('Loss')
-    # ax_comp.set_yscale('log')
     ax_comp.grid(True)
     ax_comp.legend()
 
-    # Row 2: Frechet distance
-    ax_frechet1 = fig.add_subplot(gs[1, 0:2])
-    ax_frechet1.plot(frechet_distance_rec['encoded'], label='Encoded Frechet Distance', color='blue')
-    ax_frechet1.set_title('Frechet Distance over Training Steps')
-    ax_frechet1.set_xlabel('Step')
-    ax_frechet1.set_ylabel('Frechet Distance')
-    # ax_frechet1.set_yscale('log')
-    ax_frechet1.grid(True)
-    ax_frechet1.legend()
-    
-    ax_frechet2 = fig.add_subplot(gs[1, 2:4])
-    ax_frechet2.plot(frechet_distance_rec['raw'], label='Raw Frechet Distance', color='orange')
-    ax_frechet2.set_title('Raw Frechet Distance over Training Steps')
-    ax_frechet2.set_xlabel('Step')
-    ax_frechet2.set_ylabel('Frechet Distance')
-    ax_frechet2.set_yscale('log')
-    ax_frechet2.grid(True)
-    ax_frechet2.legend()
+    # Frechet distance plot
+    ax_frechet = fig.add_subplot(gs[0, 3])
+    ax_frechet.plot(frechet_distance_rec['encoded'], label='Encoded Frechet Distance', color='blue')
+    ax_frechet.set_title('Frechet Distance over Training Steps', fontsize=20)
+    ax_frechet.set_xlabel('Step')
+    ax_frechet.set_ylabel('Frechet Distance')
+    ax_frechet.grid(True)
+    ax_frechet.legend()
 
-    # Row 3: Gesture visualization
     cmap = 'viridis'
     vmin = -2.5
     vmax = 2.5
 
+    # Row 2 (optional): Latent space visualization
+    if using_pose_encoder:
+        ax_encoded = fig.add_subplot(gs[1, 0])
+        ax_encoded.set_title("Encoded Gesture", fontsize=20)
+        ax_encoded.imshow(encoded_gesture_sequence.to(torch.float32).permute(0, 2, 1)[0, :, :].cpu().detach().numpy(), cmap=cmap, vmin=vmin, vmax=vmax)
+        ax_encoded.set_xlabel("Time")
+        ax_encoded.set_ylabel("feature")
+        ax_encoded.grid(False)
+        ax_encoded.axis('off')
+        
+        ax_encoded_diff = fig.add_subplot(gs[1, 1])
+        ax_encoded_diff.set_title("Encoded Diffused Gesture", fontsize=20)
+        ax_encoded_diff.imshow(noisy_gesture_sequence.to(torch.float32).permute(0, 2, 1)[0, :, :].cpu().detach().numpy(), cmap=cmap, vmin=vmin, vmax=vmax)
+        ax_encoded_diff.set_xlabel("Time")
+        ax_encoded_diff.set_ylabel("feature")
+        ax_encoded_diff.grid(False)
+        ax_encoded_diff.axis('off')
+        if frame_weighting is not None:
+            # Draw frame weighting as a graph on top of the encoded diffused gesture
+            ax_encoded_diff.plot(48.0 - frame_weighting.cpu().numpy() * 24.0, color='red', linewidth=2, label='Frame Weighting')
+            ax_encoded_diff.legend(loc='upper left')
+        
+        ax_encoded_denoised = fig.add_subplot(gs[1, 2])
+        ax_encoded_denoised.set_title("Encoded Denoised Gesture", fontsize=20)
+        ax_encoded_denoised.imshow(encoded_denoised_gesture_sequence.to(torch.float32).permute(0, 2, 1)[0, :, :].cpu().detach().numpy(), cmap=cmap, vmin=vmin, vmax=vmax)
+        ax_encoded_denoised.set_xlabel("Time")
+        ax_encoded_denoised.set_ylabel("feature")
+        ax_encoded_denoised.grid(False)
+        ax_encoded_denoised.axis('off')
+        
+        ax_encoded_diff_actual = fig.add_subplot(gs[1, 3])
+        ax_encoded_diff_actual.set_title("Difference (Encoded Actual - Encoded Denoised)", fontsize=20)
+        ax_encoded_diff_actual.imshow((encoded_gesture_sequence - encoded_denoised_gesture_sequence).to(torch.float32).permute(0, 2, 1)[0, :, :].cpu().detach().numpy(), cmap=cmap, vmin=vmin, vmax=vmax)
+        ax_encoded_diff_actual.set_xlabel("Time")
+        ax_encoded_diff_actual.set_ylabel("feature")
+        ax_encoded_diff_actual.grid(False)
+        ax_encoded_diff_actual.axis('off')
+
+    # Row 3: Gesture visualizations
     ax_actual = fig.add_subplot(gs[2, 0])
     ax_actual.set_title("Actual Gesture", fontsize=20)
     ax_actual.imshow(full_gesture_sequence.to(torch.float32).permute(0, 2, 1)[0, :, :].cpu().detach().numpy(), cmap=cmap, vmin=vmin, vmax=vmax)
@@ -537,14 +543,15 @@ def visualize_training_progress(
     
     ax_diffused = fig.add_subplot(gs[2, 1])
     ax_diffused.set_title("Diffused Gesture", fontsize=20)
-    if not using_autoencoder:
+    if not using_pose_encoder:
         ax_diffused.imshow(noisy_gesture_sequence.to(torch.float32).permute(0, 2, 1)[0, :, :].cpu().detach().numpy(), cmap=cmap, vmin=vmin, vmax=vmax)
     else:
         ax_diffused.text(0.5, 0.5, "Diffused Gesture is not available\n" \
-                                      "when using an autoencoder.\n\n" \
-                                      "The latent space of the autoencoder\n" \
+                                      "when using pose encoder.\n\n" \
+                                      "The latent space of the pose encoder\n" \
                                       "is diffused instead.", 
                                       horizontalalignment='center', verticalalignment='center', transform=ax_diffused.transAxes, fontsize=16, color='red')
+    
     ax_diffused.set_xlabel("Time")
     ax_diffused.set_ylabel("feature")
     ax_diffused.grid(False)
@@ -566,77 +573,71 @@ def visualize_training_progress(
     ax_diff.grid(False)
     ax_diff.axis('off')
 
-    # Row 4 (optional): Latent space visualization
-    if using_autoencoder:
-        ax_encoded = fig.add_subplot(gs[3, 0])
-        ax_encoded.set_title("Encoded Gesture", fontsize=20)
-        ax_encoded.imshow(encoded_gesture_sequence.to(torch.float32).permute(0, 2, 1)[0, :, :].cpu().detach().numpy(), cmap=cmap, vmin=vmin, vmax=vmax)
-        ax_encoded.set_xlabel("Time")
-        ax_encoded.set_ylabel("feature")
-        ax_encoded.grid(False)
-        ax_encoded.axis('off')
-        
-        ax_encoded_diff = fig.add_subplot(gs[3, 1])
-        ax_encoded_diff.set_title("Encoded Diffused Gesture", fontsize=20)
-        ax_encoded_diff.imshow(noisy_gesture_sequence.to(torch.float32).permute(0, 2, 1)[0, :, :].cpu().detach().numpy(), cmap=cmap, vmin=vmin, vmax=vmax)
-        ax_encoded_diff.set_xlabel("Time")
-        ax_encoded_diff.set_ylabel("feature")
-        ax_encoded_diff.grid(False)
-        ax_encoded_diff.axis('off')
-        
-        ax_encoded_denoised = fig.add_subplot(gs[3, 2])
-        ax_encoded_denoised.set_title("Encoded Denoised Gesture", fontsize=20)
-        ax_encoded_denoised.imshow(encoded_denoised_gesture_sequence.to(torch.float32).permute(0, 2, 1)[0, :, :].cpu().detach().numpy(), cmap=cmap, vmin=vmin, vmax=vmax)
-        ax_encoded_denoised.set_xlabel("Time")
-        ax_encoded_denoised.set_ylabel("feature")
-        ax_encoded_denoised.grid(False)
-        ax_encoded_denoised.axis('off')
-        
-        ax_encoded_diff_actual = fig.add_subplot(gs[3, 3])
-        ax_encoded_diff_actual.set_title("Difference (Encoded Actual - Encoded Denoised)", fontsize=20)
-        ax_encoded_diff_actual.imshow((encoded_gesture_sequence - encoded_denoised_gesture_sequence).to(torch.float32).permute(0, 2, 1)[0, :, :].cpu().detach().numpy(), cmap=cmap, vmin=vmin, vmax=vmax)
-        ax_encoded_diff_actual.set_xlabel("Time")
-        ax_encoded_diff_actual.set_ylabel("feature")
-        ax_encoded_diff_actual.grid(False)
-        ax_encoded_diff_actual.axis('off')
-
     # Adjust spacing between subplots
     fig.tight_layout(pad=3.0, rect=[0, 0, 1, 0.97])  # rect adjusts for the suptitle
     plt.show()
 
-    # Print the averaged losses
-    print("Averaged Training Losses over the last visualize_step:")
-    for key, value in train_loss_rec.items():
-        print(f"{key}: {value[0][-1]:.4f}")
-
-    if len(val_loss_rec['loss'][0]) > 0:
-        print("\nAveraged Validation Losses over the last visualize_step:")
-        for key, value in val_loss_rec.items():
-            print(f"{key}: {value[0][-1]:.4f}")
-
-    if len(frechet_distance_rec['encoded']) > 0:
-        print("\nFrechet Distance over the last visualize_step:")
-        print(f"Encoded: {frechet_distance_rec['encoded'][-1]:.4f}, Raw: {frechet_distance_rec['raw'][-1]:.4f}")
-    
-    visualisation_time = time.time() - visualisation_start
-    print(f"Visualisation time: {visualisation_time:.2f} s")
-
 def save_model_checkpoint(
-        model, 
+        model: ContinuousMotionModel, 
         checkpoint_dir: str, 
         model_name: str, 
-        epoch: int, 
-        step: int,
+        epoch: int,
+        hyper_parameters: dict, # Hyper parameters to save in the checkpoint
+        optimizer: torch.optim.Optimizer,
+        train_loss_rec: dict,
+        val_loss_rec: dict,
+        frechet_distance_rec: dict,
         upload: bool = False,
         run = None
     ):
-    # Save the model checkpoint
-    checkpoint_path = f"{checkpoint_dir}/{model_name}/{model_name}_epoch_{epoch}_step_{step}.pth"
-    # Create the directory if it doesn't exist
+    
+    checkpoint_path = f"{checkpoint_dir}/{model_name}/{model_name}_epoch_{epoch + 1}.pth"
+    
+    # Ensure the directory exists
     os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
-    torch.save(model.state_dict(), checkpoint_path)
+
+    # Write the hyper parameters in a pretty indented YAML file
+    if hyper_parameters is not None:
+        with open(f"{checkpoint_dir}/{model_name}/hyper_parameters.yaml", 'w') as f:
+            yaml.dump(hyper_parameters, f, default_flow_style=False, sort_keys=False, indent=2)
+
+    model_state = model.get_model_state()
+
+    # Save the model state
+    torch.save({
+        'model_state': model_state,
+        'epoch': epoch,
+        'optimizer_state_dict': optimizer.state_dict() if optimizer else None,
+        'train_loss_rec': train_loss_rec,
+        'val_loss_rec': val_loss_rec,
+        'frechet_distance_rec': frechet_distance_rec
+    }, checkpoint_path)
     
     if upload and run is not None:
         artifact = wandb.Artifact(model_name, type='model')
         artifact.add_file(checkpoint_path)
         run.log_artifact(artifact)
+
+def resume_training_from_checkpoint(
+        checkpoint_path: str,
+        optimizer: torch.optim.Optimizer, # Optional optimizer to load state,
+        train_loss_rec: dict, # Optional training loss recorder to load state,
+        val_loss_rec: dict, # Optional validation loss recorder to load state
+        frechet_distance_rec, # Optional frechet distance recorder to load state
+        device: torch.device = torch.device('cpu') # Device to load the model on
+    ):
+    # Load the checkpoint
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    model_state = checkpoint['model_state']
+
+    model = load_model(model_state, device)
+    
+    # Load optimizer state
+    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+
+    # Load loss records
+    train_loss_rec.update(checkpoint['train_loss_rec'])
+    val_loss_rec.update(checkpoint['val_loss_rec'])
+    frechet_distance_rec.update(checkpoint['frechet_distance_rec'])
+
+    return model, checkpoint['epoch'] if 'epoch' in checkpoint else 0
