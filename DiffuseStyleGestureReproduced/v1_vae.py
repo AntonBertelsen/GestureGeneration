@@ -9,6 +9,8 @@ from sklearn.decomposition import PCA
 import torch.nn.functional as F
 from dataset.dataset import *
 from IPython.display import clear_output
+from utils.bvh_processing.skeleton import Skeleton
+import os
 
 
 def vae_loss_function(
@@ -85,6 +87,7 @@ def train_vae(
         visualize_steps = 20, # Number of steps to visualize the training process
         model_save_dir = "vae_model",
         model_save_name = "vae_model",
+        display_progress=True
 ):
     model.to(device)
     model.train()
@@ -106,29 +109,8 @@ def train_vae(
         }, allow_val_change=True)  # <- Important: allows adding/updating keys
 
 
-    skeleton_info = pose_training_loader.dataset.skeleton_info
-    num_features = skeleton_info['number_of_features']
-    bone_index_weighted_by_category_vector = torch.ones(num_features)
-
-    bone_index_weighted_by_category_vector = bone_index_weighted_by_category_vector.to(device)
-
-    # Assign weights based on the categories
-    for category, weight in bone_category_weights.items():
-        # Check if the category exists in the skeleton info
-        if category not in skeleton_info['bone_categories']:
-            print(f"Warning!!! Category '{category}' not found in skeleton info. Skipping.")
-            continue
-        for bone_name in skeleton_info['bone_categories'][category]:
-            bone_indices = skeleton_info['bone_to_indices'][bone_name]
-            # Check if bone exists in the skeleton info
-            if bone_indices is None:
-                print(f"Warning!!! Bone '{bone_name}' not found in skeleton info. Skipping.")
-                continue
-            for index in bone_indices:
-                bone_index_weighted_by_category_vector[index] = weight
-
-    # Normalize the weights to sum to 1. This is to prevent the loss from being too large or too small compared to the KL divergence term
-    bone_index_weighted_by_category_vector /= bone_index_weighted_by_category_vector.sum()
+    skeleton: Skeleton = pose_training_loader.dataset.skeleton
+    bone_index_weighted_by_category_vector = skeleton.construct_bone_weighting_vector(bone_category_weights)
 
     # For logging purposes, we predefine:
     losses = []
@@ -163,12 +145,12 @@ def train_vae(
 
 
             # Compute loss
-            loss, reconstruction_loss, kl_loss, kl_per_dim = vae_loss_function(x_reconstructed, pose, mu, logvar, bone_index_weighted_by_category_vector, beta=kl_weight, free_bits=free_bits)
+            loss, reconstruction_loss, kl_loss, kl_per_dim = vae_loss_function(x_reconstructed, pose, mu, logvar, nn.HuberLoss(reduction='none'), bone_index_weighted_by_category_vector, KL_beta=kl_weight, free_bits=free_bits)
             # loss, reconstruction_loss, kl_loss, total_correlation, kl_per_dim = tc_vae_loss(x_reconstructed, pose, mu, logvar, z, beta=0.001, beta_tc=5.0, beta_kl=0.1, beta_mi=0.5, bone_weights=bone_index_weighted_by_category_vector)
             kl_per_dim_last_epoch = kl_per_dim
             
             if run is not None: 
-                step = i + epoch * len(pose_training_loader)
+                step = batch_idx + epoch * len(pose_training_loader)
                 run.log({
                         "total_loss": loss, 
                         "kl_loss": kl_loss,
@@ -189,7 +171,7 @@ def train_vae(
         reconstruction_losses.append(train_reconstruction_loss / len(pose_training_loader.dataset))
         kl_losses.append(train_kl_loss / len(pose_training_loader.dataset))
         
-        if epoch % visualize_steps == 0:
+        if epoch % visualize_steps == 0 and not is_running_on_slurm() and display_progress:
 
             with torch.no_grad():
                 clear_output(wait=True)
@@ -290,3 +272,9 @@ def train_vae(
     model_save_path = f"{model_save_dir}/{model_save_name}.pth"
 
     torch.save(model.state_dict(), model_save_path)
+
+
+
+# We use to to not draw the plots when running on SLURM
+def is_running_on_slurm():
+    return 'SLURM_JOB_ID' in os.environ or 'SLURM_JOB_NAME' in os.environ

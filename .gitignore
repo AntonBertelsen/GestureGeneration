@@ -208,3 +208,5 @@ data_pipe.sav
 
 .DS_Store
 DiffuseStyleGestureReproduced/dataset/genea2023_dataset/trn/main-agent/features/trn_2023_v0_000.npz
+
+DiffuseStyleGestureReproduced/.wandbkey

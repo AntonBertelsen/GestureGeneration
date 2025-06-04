@@ -72,42 +72,6 @@ def configur_trainfunction_for_wandb_sweep(
 
     return _configured_trainfunction_for_wandb_sweep
 
-if __name__ == "__main__":
-
-    wandb.login()
-
-    project_name = "v1_sliding_diffusion"
-
-    """
-    !!! IMPORTANT !!!
-
-    IT IS ESSENTIAL TO REPLACE THE PARAMETERS FROM THE TRAINING FUNCTION WITH 
-    THE PARAMETERS FROM THE SWEEP CONFIGURATION IN THE CALL TO THE TRAINING FUNCTION
-
-    Alwayse check the configured_trainfunction_for_wandb_sweep
-    """
-
-    sweep_config = {
-        "method": "random",
-        "metric": {"name": "total_loss", "goal": "minimize"},
-        "parameters": {
-            "learning_rate": {"min": 0.00001, "max": 0.001},
-        },
-    }
-
-    the_configured_trainfunction_for_wandb_sweep = configur_trainfunction_for_wandb_sweep(
-        project_name=project_name,
-        experiment_collection_name="VAE_V1_sweep_1",
-        current_model_name="VAE_V1",
-    )
-
-    sweep_id = wandb.sweep(sweep_config, project=project_name)
-
-    wandb.agent(sweep_id, function=the_configured_trainfunction_for_wandb_sweep)
-
-
-
-
 class sweep_traing_confics:
 
     def __init__(self, device, num_epochs, run, config):
@@ -123,7 +87,7 @@ class sweep_traing_confics:
             device=self.device,
             pose_training_loader = DataLoader(
                     GPUDataset(
-                        consolidated_file= "dataset/genea2023_dataset/trn/main-agent/consolidated.npz",
+                        consolidated_file= "dataset/genea2023_dataset/toy/main-agent/consolidated.npz",
                         seq_length=1,
                         seed_length=0,
                         batch_size=64,
@@ -156,6 +120,7 @@ class sweep_traing_confics:
             visualize_steps = 20, # Number of steps to visualize the training process
             model_save_dir = "VAE_models_checkpoints",
             model_save_name = model_save_name,
+            display_progress=False
         )
     
     def main_sd_model_sweep(self, vae_model, lr):
@@ -187,7 +152,7 @@ class sweep_traing_confics:
             device=self.device,
             training_loader=DataLoader(
                     GPUDataset(
-                        consolidated_file= "dataset/genea2023_dataset/trn/main-agent/consolidated.npz",
+                        consolidated_file= "dataset/genea2023_dataset/toy/main-agent/consolidated.npz",
                         seq_length=100,
                         seed_length=0,
                         batch_size=64,
@@ -200,7 +165,7 @@ class sweep_traing_confics:
                 ),
             val_loader=DataLoader(
                     GPUDataset(
-                        consolidated_file= "dataset/genea2023_dataset/trn/main-agent/consolidated.npz",
+                        consolidated_file= "dataset/genea2023_dataset/toy/main-agent/consolidated.npz",
                         seq_length=100,
                         seed_length=0,
                         batch_size=64,
@@ -229,3 +194,41 @@ class sweep_traing_confics:
             visualize_step=10
         )
     
+
+
+if __name__ == "__main__":
+
+    # Load the key from the file .wanddbkey
+    with open(".wandbkey", "r") as f:
+        wandb_key = f.read().strip()
+
+    wandb.login(key=wandb_key)
+
+    project_name = "v1_sliding_diffusion"
+
+    """
+    !!! IMPORTANT !!!
+
+    IT IS ESSENTIAL TO REPLACE THE PARAMETERS FROM THE TRAINING FUNCTION WITH 
+    THE PARAMETERS FROM THE SWEEP CONFIGURATION IN THE CALL TO THE TRAINING FUNCTION
+
+    Alwayse check the configured_trainfunction_for_wandb_sweep
+    """
+
+    sweep_config = {
+        "method": "random",
+        "metric": {"name": "total_loss", "goal": "minimize"},
+        "parameters": {
+            "learning_rate": {"min": 0.00001, "max": 0.001},
+        },
+    }
+
+    the_configured_trainfunction_for_wandb_sweep = configur_trainfunction_for_wandb_sweep(
+        project_name=project_name,
+        experiment_collection_name="VAE_V1_sweep_1",
+        current_model_name="VAE_V1",
+    )
+
+    sweep_id = wandb.sweep(sweep_config, project=project_name)
+
+    wandb.agent(sweep_id, function=the_configured_trainfunction_for_wandb_sweep)
