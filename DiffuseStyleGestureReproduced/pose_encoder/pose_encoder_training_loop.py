@@ -1,3 +1,4 @@
+import os
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -12,24 +13,39 @@ def train(
         model: PoseEncoder,
         pose_training_loader: DataLoader,
         device: torch.device,
+        run = None,
         learning_rate: float = 3e-3,
         num_epochs: int = 1000,
         warm_up_kl_anneal_steps: int = 100,
         kl_anneal_steps: int = 300,
         kl_beta: float = 0.0001,
-        bone_weighting: dict[str, float] = {},
+        category_weighting: dict[str, float] = {},
         visualize_steps: int = 10,
         name: str = "pose_encoder.pth",
+        display_progress: bool = True
     ):
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
     model.to(device)
 
-    bone_weighting_vector = pose_training_loader.dataset.skeleton.construct_bone_weighting_vector(bone_weighting)
+    bone_weighting_vector = pose_training_loader.dataset.skeleton.construct_bone_weighting_vector(category_weighting)
 
     losses = []
     reconstruction_losses = []
     kl_losses = []
     kl_per_dim_last_epoch = None
+
+    if run is not None:
+        run.config.update({
+            "learning_rate": learning_rate,
+            "num_epochs": num_epochs,
+            "warm_up_kl_anneal_steps": warm_up_kl_anneal_steps,
+            "kl_anneal_steps": kl_anneal_steps,
+            "kl_beta": kl_beta,
+            "category_weighting": category_weighting,
+            "batch_size": pose_training_loader.dataset.batch_size,
+            "dataset_type": pose_training_loader.dataset.__class__.__name__,
+            "pose_encoder_model": model.get_WnB_config_specs(),
+        }, allow_val_change=True)
 
     for epoch in range(num_epochs):
         model.train()
@@ -81,7 +97,14 @@ def train(
         reconstruction_losses.append(train_reconstruction_loss / len(pose_training_loader.dataset))
         kl_losses.append(train_kl_loss / len(pose_training_loader.dataset))
         
-        if epoch % visualize_steps == 0:
+        if run is not None:
+            run.log({
+                "loss": losses[-1],
+                "reconstruction_loss": reconstruction_losses[-1],
+                "kl_loss": kl_losses[-1]
+            })
+
+        if epoch % visualize_steps == 0 and display_progress and not is_running_on_slurm():
             visualize_training(
                 model,
                 pose,
@@ -209,3 +232,7 @@ def vae_loss(x_reconstructed, x, mu, logvar, bone_weights=None, beta=0.5):
 
     # print("KL loss magnitude: ", KL.item())
     return reconstruction_loss + beta * kl_divergence, reconstruction_loss, kl_divergence, kl_per_dim
+
+# We use to to not draw the plots when running on SLURM
+def is_running_on_slurm():
+    return 'SLURM_JOB_ID' in os.environ or 'SLURM_JOB_NAME' in os.environ

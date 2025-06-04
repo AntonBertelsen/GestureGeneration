@@ -2,6 +2,7 @@ from abc import ABC, abstractmethod
 from typing import Dict, Union
 
 class WnBTrackable(ABC):
+    
     @abstractmethod
     def get_WnB_config_specs(self) -> Dict[str, Union[str, int, float, bool]]:
         # Return the configuration specs needed for Weights & Biases tracking.

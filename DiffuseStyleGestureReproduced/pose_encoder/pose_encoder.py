@@ -67,3 +67,6 @@ class PoseEncoder(nn.Module, WnBTrackable):
     
     def get_WnB_config_specs(self):
         return self.hyperparameter_dict_to_WnB_tracking
+    
+    def add_hyperparameters_to_WnB_tracking(self, hyperparameter_dict):
+        self.hyperparameter_dict_to_WnB_tracking.update(hyperparameter_dict)

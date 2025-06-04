@@ -499,7 +499,19 @@ def load_model(model_checkpoint, device=None):
 
     # Extract configuration
     config = model_checkpoint['config']
+
+    model = construct_model(config, device)
     
+    # Fix state_dict keys if compiled with torch.compile
+    state_dict = model_checkpoint['state_dict']
+    if any(key.startswith('_orig_mod.') for key in state_dict):
+        state_dict = {k.replace('_orig_mod.', ''): v for k, v in state_dict.items()}
+    
+    model.load_state_dict(state_dict)
+    return model
+
+# This constructs a new model based on a wandb configuration dictionary, which holds all the hyper parameters for the model.
+def construct_model(config: dict, device):
     # Get diffusion noise schedule
     schedule_name = config['diffusion']['name']
     schedule_func = getattr(Diffusion, f"{schedule_name}", None)
@@ -515,15 +527,15 @@ def load_model(model_checkpoint, device=None):
         num_of_timestep_frames      = config['diffusion']['num_of_timestep_frames'],
         num_of_post_timestep_frames = config['diffusion']['num_of_post_timestep_frames'],
         noise_schedule              = noise_schedule,
-        num_of_timestep_stackings   = config['diffusion'].get('num_of_timestep_stackings', 1)
+        num_of_timestep_stackings   = config['diffusion']['num_of_timestep_stackings']
     )
     
     # Create poe encoder if it was used
     pose_encoder = None
     if config['pose_encoder']:
         pose_encoder = PoseEncoder(
-            z_dim       = config['pose_encoder'].get('z_dim', 48),
-            pose_dim    = config['pose_encoder'].get('pose_dim', 345),
+            z_dim       = config['pose_encoder']['z_dim'],
+            pose_dim    = config['pose_encoder']['pose_dim'],
             device      = device
         )
     
@@ -540,11 +552,5 @@ def load_model(model_checkpoint, device=None):
         pose_encoder                = pose_encoder,
         device                      = device
     )
-    
-    # Fix state_dict keys if compiled with torch.compile
-    state_dict = model_checkpoint['state_dict']
-    if any(key.startswith('_orig_mod.') for key in state_dict):
-        state_dict = {k.replace('_orig_mod.', ''): v for k, v in state_dict.items()}
-    
-    model.load_state_dict(state_dict)
+
     return model
