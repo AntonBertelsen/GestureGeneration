@@ -1,0 +1,46 @@
+#!/bin/bash
+
+#SBATCH --job-name=pytorch-gpu-condaenv         # Job name
+#SBATCH --output=hpc_job_outputs/job.%j.out     # Name of output file (%j expands to jobId)
+#SBATCH --cpus-per-task=2                       # Schedule X cores (includes hyperthreading)
+#SBATCH --time=00-06:00:00                      # Run time (dd-hh:mm:ss)
+#SBATCH --gres=gpu
+#SBATCH --partition=acltr
+#SBATCH --mail-type=END                         # BEGIN,FAIL,END
+
+echo "Running on $(hostname):"
+
+module load Anaconda3
+
+# Set up shell for conda usage in batch mode
+# source ~/anaconda3/etc/profile.d/conda.sh
+
+# Clean previous environment
+# conda env remove --name sd_v1 -y || true
+
+# Install mamba in base if not present
+# conda install -n base -c conda-forge mamba -y
+
+# Create environment with required packages
+# mamba create -n sd_v1 pytorch torchvision torchaudio pytorch-cuda=11.8 -c pytorch -c nvidia -y
+
+# Activate new environment
+source activate sd_v1
+
+# Verify installations is loaded and pressent in the env
+python -c "import torch; print(torch.cuda.get_device_name(0))"
+
+pip install local-attention
+pip install torchaudio
+pip install transformers
+pip install torchvision
+pip install IPython
+
+python check_libs.py
+
+# Make the features
+# python3 -m dataset.data_processor
+
+python sweep.py
+
+# Running the sweep

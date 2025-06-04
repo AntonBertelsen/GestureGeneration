@@ -2,6 +2,7 @@ ipynb
 numpy
 torch
 torchaudio
+torchvision
 librosa # Possibly not needed. We use it only for calculating onsets, which is not that difficult to implement ourselves.
 matplotlib
 transformers
@@ -10,3 +11,4 @@ einops
 local-attention
 moviepy # for generatting videos of the defussion and generation processes - mainly for debugging
 wandb
+IPython

@@ -189,10 +189,10 @@ def train(
             # log the loss to wandb (W&B)
             if run is not None: 
                 step = i + epoch * len(training_loader)
-                run.log({"train/loss": total_loss.item()}, step=step)
+                run.log({"total_loss": total_loss.item()}, step=step)
 
             # Visualization
-            if i % visualize_step == 0:
+            if i % visualize_step == 0 and not is_running_on_slurm():
                 visualize_training_progress(
                     full_gesture_sequence               = gesture_sequence,
                     full_denoised_gesture_sequence      = output,
@@ -300,7 +300,7 @@ def train(
         # Log the losses to wandb (W&B) if a run is provided.
         if run is not None: 
             step = i + epoch * len(training_loader)
-            run.log({"val/loss": val_loss / len(val_loader)}, step=step)
+            run.log({"validation loss": val_loss / len(val_loader)}, step=step)
 
     # close the wandb (W&B) run
     if run is not None: 
@@ -640,3 +640,7 @@ def save_model_checkpoint(
         artifact = wandb.Artifact(model_name, type='model')
         artifact.add_file(checkpoint_path)
         run.log_artifact(artifact)
+
+
+def is_running_on_slurm():
+    return "SLURM_JOB_ID" in os.environ
