@@ -173,13 +173,21 @@ cython_debug/
 
 # Dataset exclusion
 # Ignore everything inside dataset/
+DiffuseStyleGestureReproduced/dataset/*
 DiffuseStyleGestureReproduced/dataset/genea2023_dataset/trn/**/bvh/
 DiffuseStyleGestureReproduced/dataset/genea2023_dataset/trn/**/tsv/
 DiffuseStyleGestureReproduced/dataset/genea2023_dataset/trn/**/wav/
 DiffuseStyleGestureReproduced/dataset/genea2023_dataset/trn/**/wav/
 DiffuseStyleGestureReproduced/dataset/genea2023_dataset/trn/**/features/
 DiffuseStyleGestureReproduced/dataset/genea2023_dataset/*
-DiffuseStyleGestureReproduced/dataset/*
+DiffuseStyleGestureReproduced/dataset/
+
+
+# Ignore everything in models:
+DiffuseStyleGestureReproduced/v1_models/
+
+# Ignore everything in FDG:
+DiffuseStyleGestureReproduced/FGD/models/*
 
 DiffuseStyleGestureReproduced/dataset/wandb/
 
@@ -198,3 +206,4 @@ DiffuseStyleGestureReproduced/dataset/genea2023_dataset/trn/main-agent/features/
 
 DiffuseStyleGestureReproduced/v1_models/
 DiffuseStyleGestureReproduced/pose_encoder/models/
+DiffuseStyleGestureReproduced/.wandbkey

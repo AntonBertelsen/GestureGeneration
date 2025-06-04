@@ -14,15 +14,6 @@ class PoseEncoder(nn.Module, WnBTrackable):
         self.pose_dim = pose_dim
         self.z_dim = z_dim
 
-        # Encoder network
-        self.fc1 = nn.Linear(pose_dim, 128)
-        self.fc2_mu = nn.Linear(128, z_dim)  # Mean of latent space
-        self.fc2_logvar = nn.Linear(128, z_dim)  # Log variance of latent space
-
-        # Decoder network
-        self.fc3 = nn.Linear(z_dim, 128)
-        self.fc4 = nn.Linear(128, pose_dim)
-
         if checkpoint_path is not None:
             self.load_state_dict(torch.load("pose_encoder/models/" + checkpoint_path, map_location=device))
             print(f"VAE model loaded from {checkpoint_path}")
@@ -32,6 +23,20 @@ class PoseEncoder(nn.Module, WnBTrackable):
             "pose_dim": pose_dim,
             "checkpoint_path": checkpoint_path
         }
+
+
+        # Encoder network
+        self.fc1 = nn.Linear(pose_dim, 128)
+        self.fc2_mu = nn.Linear(128, z_dim)  # Mean of latent space
+        self.fc2_logvar = nn.Linear(128, z_dim)  # Log variance of latent space
+
+        self.add_hyperparameters_to_WnB_tracking({"num_of_encoder_layers" : 2})
+
+        # Decoder network
+        self.fc3 = nn.Linear(z_dim, 128)
+        self.fc4 = nn.Linear(128, pose_dim)
+
+        self.add_hyperparameters_to_WnB_tracking({"num_of_decoder_layers" : 2})
 
         if device is not None:
             self.to(device)

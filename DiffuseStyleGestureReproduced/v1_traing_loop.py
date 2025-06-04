@@ -134,6 +134,8 @@ def train(
     if device.type == 'cuda':
         model = torch.compile(model, backend="cudagraphs")
 
+    epoch_length = len(training_loader)
+
     # Main training loop, where we iterate over the number of epochs and the training data.
     for epoch in range(start_epoch, num_epochs):
         # I set the model to training mode
@@ -191,8 +193,13 @@ def train(
                                       f"\033[92mLast epoch loss": f"{train_loss_rec['epoch_loss'][0][-1] if train_loss_rec['epoch_loss'][0] else 0}\033[0m",
                                       f"\033[94mFrechet distance": f"{frechet_distance_rec['encoded'][-1] if frechet_distance_rec['encoded'] else 0}\033[0m"})
             
+            # log the loss to wandb (W&B)
+            if run is not None: 
+                step = i + epoch * epoch_length
+                run.log({"total_loss": total_loss.item()}, step=step)
+
             # Visualization
-            if i % visualize_step == 0:
+            if i % visualize_step == 0 and not is_running_on_slurm():
                 visualize_training_progress(
                     full_gesture_sequence               = gesture_sequence,
                     full_denoised_gesture_sequence      = output,
@@ -224,7 +231,6 @@ def train(
             run                     = run
         )
 
-        epoch_length = len(training_loader)
         train_loss_rec['epoch_loss'][0].append(np.mean(train_loss_rec['loss'][0][-epoch_length:]))
 
         # At the end of the epoch, we evaluate the model on the validation set.
@@ -280,6 +286,10 @@ def train(
             val_loss_rec[key][1].append(np.mean(train_loss_rec[key][0]))
             # clear the losses for the next epoch
             val_loss_rec[key][0].clear()
+        
+        # Log the losses to wandb (W&B) if a run is provided.
+        if run is not None: 
+            run.log({"validation loss": val_loss_rec[key][1][-1]}, step = epoch * epoch_length)
 
     # close the wandb (W&B) run
     if run is not None: 
@@ -641,3 +651,6 @@ def resume_training_from_checkpoint(
     frechet_distance_rec.update(checkpoint['frechet_distance_rec'])
 
     return model, checkpoint['epoch'] if 'epoch' in checkpoint else 0
+
+def is_running_on_slurm():
+    return "SLURM_JOB_ID" in os.environ
