@@ -34,7 +34,8 @@ def train(
         category_weighting: dict[str, float] = {},
         frame_weighting_segments_info: list[(float, float, float)] = [], # This is a list of tuples, where each tuple contains the start and end of a segment, and the end frame of the segment. This is used to create a frame weighting vector that weights the loss for each frame. Since we are essentially doing infill diffusion, we want to bias the the loss for the frames that are not masked out.
         visualize_step: int = 200, # How often to print profiling stats
-        continue_from_checkpoint: str = None # Path to a checkpoint to continue training from. If provided, the model will be loaded from this checkpoint and training will continue from there.
+        continue_from_checkpoint: str = None, # Path to a checkpoint to continue training from. If provided, the model will be loaded from this checkpoint and training will continue from there.
+        visualize_training_progress = True, # Whether to display the training progress in a Jupyter notebook
     ):
 
     current_model_name = f"{experiment_collection_name}_{time.strftime('%Y-%m-%d_%H-%M-%S')}"
@@ -199,7 +200,7 @@ def train(
                 run.log({"total_loss": total_loss.item()}, step=step)
 
             # Visualization
-            if i % visualize_step == 0 and not is_running_on_slurm():
+            if i % visualize_step == 0 and not is_running_on_slurm() and visualize_training_progress:
                 visualize_training_progress(
                     full_gesture_sequence               = gesture_sequence,
                     full_denoised_gesture_sequence      = output,

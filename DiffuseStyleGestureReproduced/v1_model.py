@@ -481,11 +481,10 @@ class ContinuousMotionModel(nn.Module, WnBTrackable):
         return self.hyperparameter_dict_to_WnB_tracking
 
     def get_model_state(self):        
-        # return model configuration and weights together
         return {
             'state_dict': self.state_dict(),
             'config': {
-                'general': self.hyperparameter_dict_to_WnB_tracking,
+                **self.hyperparameter_dict_to_WnB_tracking,
                 'diffusion': self.diffusion.get_WnB_config_specs(),
                 'pose_encoder': self.pose_encoder.get_WnB_config_specs() if self.pose_encoder else None,
             }
@@ -539,18 +538,36 @@ def construct_model(config: dict, device):
             device      = device
         )
     
-    # Create the main model
-    model = ContinuousMotionModel(
-        n_gesture_length            = config['general']['n_gesture_length'],
-        audio_features_per_frame    = config['general']['audio_features_per_frame'],
-        pose_features_per_frame     = config['general']['pose_features_per_frame'],
-        number_of_styles            = config['general']['number_of_styles'],
-        diffusion                   = diffusion,
-        condition_mask_probabilty   = config['general']['condition_mask_probabilty'],
-        number_of_attention_heads   = config['general']['number_of_attention_heads'],
-        predict_full_duration       = config['general']['predict_full_duration'],
-        pose_encoder                = pose_encoder,
-        device                      = device
-    )
+    # TODO: Get rid of this, it is for backwards compatibility
+    if 'general' in config:
+        # Create the main model
+        model = ContinuousMotionModel(
+            n_gesture_length            = config['general']['n_gesture_length'],
+            audio_features_per_frame    = config['general']['audio_features_per_frame'],
+            pose_features_per_frame     = config['general']['pose_features_per_frame'],
+            number_of_styles            = config['general']['number_of_styles'],
+            diffusion                   = diffusion,
+            condition_mask_probabilty   = config['general']['condition_mask_probabilty'],
+            number_of_attention_heads   = config['general']['number_of_attention_heads'],
+            predict_full_duration       = config['general']['predict_full_duration'],
+            pose_encoder                = pose_encoder,
+            device                      = device
+        )
 
-    return model
+        return model
+    else:
+        # Create the main model
+        model = ContinuousMotionModel(
+            n_gesture_length            = config['n_gesture_length'],
+            audio_features_per_frame    = config['audio_features_per_frame'],
+            pose_features_per_frame     = config['pose_features_per_frame'],
+            number_of_styles            = config['number_of_styles'],
+            diffusion                   = diffusion,
+            condition_mask_probabilty   = config['condition_mask_probabilty'],
+            number_of_attention_heads   = config['number_of_attention_heads'],
+            predict_full_duration       = config['predict_full_duration'],
+            pose_encoder                = pose_encoder,
+            device                      = device
+        )
+
+        return model

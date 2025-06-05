@@ -1,7 +1,5 @@
 from torch.utils.data import DataLoader
 from dataset.dataset import *
-from pose_encoder.pose_encoder import PoseEncoder
-from pose_encoder.pose_encoder_training_loop import train as train_pose_encoder
 from v1_training_loop import train as train_sd_model
 from v1_model import construct_model
 import wandb
@@ -12,16 +10,25 @@ def sd_model_sweep():
     config = run.config
     device = get_device()
 
+    # Pre calculate the sequence length based on the diffusion parameters. This is because these parameters are tied together, and so when we are sweeping, we need to ensure that the sequence length is consistent with the diffusion model's expectations.
+    seq_length = config['model']['diffusion']['num_of_pre_timestep_frames'] + config['model']['diffusion']['num_of_timestep_frames'] + config['model']['diffusion']['num_of_post_timestep_frames']
+
+    # Likewise, we update the model configuration to reflect the sequence length.
+    config['model']['n_gesture_length'] = seq_length
+
+    # And we also update the pose features per frame to reflect the output of the pose encoder.
+    config['model']['pose_features_per_frame'] = config['model']['pose_encoder']['z_dim']
+
     train_sd_model(
         experiment_collection_name = run.group,
         upload_model_check_point = False,
         model_checkpoint_dir = "v1_sweep_models",
-        model = construct_model(config['model']),
+        model = construct_model(config['model'], device),
         device = device,
         training_loader = DataLoader(
                 GPUDataset(
                     consolidated_file = "dataset/genea2023_dataset/trn/main-agent/consolidated.npz",
-                    seq_length = config['seq_length'],
+                    seq_length = seq_length,
                     seed_length = 0,
                     batch_size = config['batch_size'],
                     epoch_length = config['epoch_length'],
@@ -34,7 +41,7 @@ def sd_model_sweep():
         val_loader=DataLoader(
                 GPUDataset(
                     consolidated_file = "dataset/genea2023_dataset/val/main-agent/consolidated.npz",
-                    seq_length = config['seq_length'],
+                    seq_length = seq_length,
                     seed_length = 0,
                     batch_size = config['batch_size'],
                     epoch_length = 30,
@@ -67,8 +74,7 @@ def sd_model_sweep():
             (1.0, 0.85, 80),
             (0.85, 0.6, 100)
         ],
-        visualize_step = 100,
-        continue_from_checkpoint="latest"
+        visualize_training_progress=False
     )
 
 if __name__ == "__main__":
@@ -110,9 +116,7 @@ if __name__ == "__main__":
             "model": {
                 "parameters": {
                     # General model parameters
-                    "n_gesture_length": {"values": [50, 100, 150]},
                     "audio_features_per_frame": {"value": 37},  # Fixed based on dataset
-                    "pose_features_per_frame": {"value": 64},   # From pose encoder
                     "number_of_styles": {"value": 17},          # Fixed based on dataset
                     "condition_mask_probabilty": {"min": 0.05, "max": 0.2},
                     "number_of_attention_heads": {"values": [4, 8, 16]},
@@ -121,9 +125,9 @@ if __name__ == "__main__":
                     # Diffusion parameters
                     "diffusion": {
                         "parameters": {
-                            "num_of_pre_timestep_frames": {"values": [25, 50, 75]},
-                            "num_of_timestep_frames": {"values": [25, 50, 75]},
-                            "num_of_post_timestep_frames": {"values": [0, 25, 50]},
+                            "num_of_pre_timestep_frames": {"values": [50]},
+                            "num_of_timestep_frames": {"values": [50]},
+                            "num_of_post_timestep_frames": {"values": [0]},
                             "beta_min": {"min": 0.0001, "max": 0.001},
                             "beta_max": {"min": 0.1, "max": 0.2},
                             "name": {"value": "linear_schedule"},

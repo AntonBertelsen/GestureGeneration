@@ -2,8 +2,6 @@ from torch.utils.data import DataLoader
 from dataset.dataset import *
 from pose_encoder.pose_encoder import PoseEncoder
 from pose_encoder.pose_encoder_training_loop import train as train_pose_encoder
-from v1_training_loop import train as train_sd_model
-from v1_model import construct_model
 import wandb
 from utils.utils import get_device
 
