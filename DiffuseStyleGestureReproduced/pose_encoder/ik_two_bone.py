@@ -277,7 +277,7 @@ class IKChain2Bone:
             
             # Second bone's parent is the first bone
             rot2_local = torch.matmul(rot1_world.transpose(-2, -1), rot2_world)
-            return rot1_local, rot2_local, joint1, joint2
+            return rot1_local, rot2_local, joint1, joint2, rot1_world, rot2_world
 
         return rot1_world, rot2_world, joint1, joint2
     
@@ -384,3 +384,41 @@ class IKChain2Bone:
                 
                 swivel_angles[proj_valid_idx] = torch.atan2(sin_swivel, cos_swivel).unsqueeze(1)
         return swivel_angles
+    
+    def extract_twist(self, bone_dir, rot_matrix):
+        """Extract twist component (rotation around bone's own axis)"""
+        batch_size = rot_matrix.shape[0]
+        
+        # Normalize bone direction
+        bone_dir = F.normalize(bone_dir, dim=1)
+        
+        # Create a reference frame with bone_dir as forward
+        up_ref = torch.zeros_like(bone_dir)
+        # Use world up as starting point, but ensure it's not parallel to bone_dir
+        world_up = torch.tensor([0.0, 1.0, 0.0], device=self.device)
+        world_up = world_up.unsqueeze(0).expand(batch_size, 3)
+        
+        # Create perpendicular vector if needed
+        parallel_mask = torch.abs(torch.sum(bone_dir * world_up, dim=1)) > 0.99
+        if parallel_mask.any():
+            world_up[parallel_mask] = torch.tensor([1.0, 0.0, 0.0], device=self.device)
+        
+        # Create orthonormal frame
+        right_ref = F.normalize(torch.cross(world_up, bone_dir, dim=1), dim=1)
+        up_ref = F.normalize(torch.cross(bone_dir, right_ref, dim=1), dim=1)
+        
+        # Get the bone's reference up direction after rotation
+        rotated_up = torch.matmul(rot_matrix, up_ref.unsqueeze(-1)).squeeze(-1)
+        
+        # Project onto plane perpendicular to bone direction
+        proj_up = rotated_up - torch.sum(rotated_up * bone_dir, dim=1, keepdim=True) * bone_dir
+        proj_up = F.normalize(proj_up, dim=1)
+        
+        # Calculate twist angle
+        cos_twist = torch.sum(proj_up * up_ref, dim=1)
+        # Cross product for direction
+        cross = torch.cross(up_ref, proj_up, dim=1)
+        sin_twist = torch.sum(cross * bone_dir, dim=1)
+        
+        twist_angle = torch.atan2(sin_twist, cos_twist).unsqueeze(1)
+        return twist_angle
