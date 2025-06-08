@@ -2,6 +2,7 @@ import numpy as np
 import torch
 from typing import List, Dict, Optional
 from scipy.spatial.transform import Rotation as R
+from utils.utils import convert_6d_to_matrix, convert_matrix_to_6d
 
 class Skeleton:
     def __init__(self):
@@ -178,32 +179,6 @@ class Skeleton:
         # Combine into 6D representation
         return np.hstack([col1, col2])  # Shape: (num_frames, 6)
     
-    def _6d_to_matrix(self, rot_6d_batch: torch.Tensor) -> torch.Tensor:
-        """Convert 6D rotation representation to rotation matrices."""
-        batch_size = rot_6d_batch.shape[0]
-        num_frames = rot_6d_batch.shape[1]
-        
-        # Extract columns
-        col1 = rot_6d_batch[:, :, 0:3]  # Shape: (batch_size, num_frames, 3)
-        col2 = rot_6d_batch[:, :, 3:6]  # Shape: (batch_size, num_frames, 3)
-        
-        # Normalize columns (vectorized)
-        col1_norm = torch.linalg.norm(col1, axis=2, keepdims=True)
-        col2_norm = torch.linalg.norm(col2, axis=2, keepdims=True)
-        col1 = col1 / col1_norm
-        col2 = col2 / col2_norm
-        
-        # Compute cross product for third column (vectorized)
-        col3 = torch.linalg.cross(col1, col2)
-        
-        # Stack into rotation matrices
-        matrices = torch.zeros((batch_size, num_frames, 3, 3), device=rot_6d_batch.device)
-        matrices[:, :, :, 0] = col1
-        matrices[:, :, :, 1] = col2
-        matrices[:, :, :, 2] = col3
-        
-        return matrices
-    
     def _matrix_to_euler_batch(self, matrix_batch: torch.Tensor) -> np.ndarray:
         """Convert rotation matrices to Euler angles."""
         # matrix_batch is shape (batch_size, num_frames, 3, 3)
@@ -226,7 +201,7 @@ class Skeleton:
     def _6d_to_euler_batch(self, rot_6d_batch: torch.Tensor) -> np.ndarray:
         """Convert 6D rotation representation to Euler angles."""
         # Convert 6D to rotation matrices
-        rot_matrices = self._6d_to_matrix(rot_6d_batch)
+        rot_matrices = convert_6d_to_matrix(rot_6d_batch)
         
         # Convert to Euler angles
         euler_angles = self._matrix_to_euler_batch(rot_matrices)
@@ -257,7 +232,7 @@ class Skeleton:
             return world_positions * self.world_pos_std_pose + self.world_pos_mean_pose
         return world_positions
     
-    def calculate_world_positions(self, frame_data: torch.Tensor) -> torch.Tensor:
+    def calculate_world_positions(self, frame_data: torch.Tensor, return_rotations=False) -> torch.Tensor:
         """Calculate world positions using forward kinematics."""
 
         # Check if the input is a npy array or a torch tensor (The data proccessing pipeline uses npy arrays)
@@ -321,9 +296,9 @@ class Skeleton:
                             start_idx = rot_indices[0]
                             # Extract 6D rotation for all batches and frames
                             rot_6d = frame_data[:, :, start_idx:start_idx+6]
-                            flat_matrices = self._6d_to_matrix(rot_6d)
+                            matrices = convert_6d_to_matrix(rot_6d)
                             # Reshape back to batch dimensions
-                            local_rot_batch = flat_matrices
+                            local_rot_batch = matrices
                     
                     # Calculate world rotation
                     world_rot = torch.matmul(parent_rot, local_rot_batch)
@@ -356,6 +331,19 @@ class Skeleton:
             # Remove batch dimension if it was added
             flattened_world_positions = flattened_world_positions.squeeze(0)
 
+        if return_rotations:
+            # Filter world_rotations to only include target joints
+            if self.target_joints is not None:
+                filtered_rotations = {k: v for k, v in world_rotations.items() if k in self.target_joints}
+                if not has_batch_dim:
+                    # Remove batch dimension from rotations if it was added
+                    filtered_rotations = {k: v.squeeze(0) for k, v in filtered_rotations.items()}
+                return flattened_world_positions, filtered_rotations
+            if not has_batch_dim:
+                # Remove batch dimension from rotations if it was added
+                world_rotations = {k: v.squeeze(0) for k, v in world_rotations.items()}
+            return flattened_world_positions, world_rotations
+        
         return flattened_world_positions
 
     def pose_to_websocket_format(self, pose):   
@@ -395,3 +383,82 @@ class Skeleton:
         
         # Return single frame or array of frames
         return pose_data
+
+    def get_joint_rotation_indices(self, joint_name: str) -> List[int]:
+        """Get the rotation indices for a joint in the feature vector."""
+        if joint_name not in self.bone_to_indices_map:
+            raise ValueError(f"Joint '{joint_name}' not found in skeleton. Available joints: {list(self.bone_to_indices_map.keys())}")
+        
+        indices = self.bone_to_indices_map[joint_name]
+        # For rotations, we expect 6 indices (6D representation)
+        if len(indices) != 6:
+            raise ValueError(f"Joint '{joint_name}' does not have 6D rotation representation. Found {len(indices)} indices.")
+        
+        return indices
+
+    def get_joint_position_indices(self, joint_name: str) -> List[int]:
+        """Get the position indices for a joint in the feature vector."""
+        if joint_name != 'body_world':
+            raise ValueError(f"Only 'body_world' joint has position channels. Got '{joint_name}'")
+        
+        if joint_name not in self.bone_to_indices_map:
+            raise ValueError(f"Joint '{joint_name}' not found in skeleton.")
+        
+        indices = self.bone_to_indices_map[joint_name]
+        # For positions, we expect 3 indices
+        if len(indices) != 3:
+            raise ValueError(f"Joint '{joint_name}' does not have 3D position representation. Found {len(indices)} indices.")
+        
+        return indices
+    
+    def calculate_distance_between_joints(self, joint_a: str, joint_b: str, reference_pose: torch.Tensor = None) -> float:
+        """
+        Calculate the direct distance between two joints in world space.
+        """
+        # Get target joints list
+        target_joints = self.target_joints if self.target_joints else self.joints
+        
+        # Check if joints exist in the skeleton
+        if joint_a not in target_joints or joint_b not in target_joints:
+            available_joints = target_joints[:10]
+            raise ValueError(f"Joint not found in skeleton. Available joints: {available_joints}...")
+        
+        # Get joint indices in the world positions array
+        joint_a_idx = target_joints.index(joint_a)
+        joint_b_idx = target_joints.index(joint_b)
+        
+        # Create REST pose if none provided (not zeros!)
+        if reference_pose is None:
+            # Create a valid rest pose instead of zeros
+            reference_pose = torch.zeros((1, self.get_channel_count()), device=self.device)
+            # For 6D rotations, use [1,0,0,0,1,0] which represents identity rotation
+            for i, (out_start_idx, _) in enumerate(self._rot_extraction_map):
+                reference_pose[0, out_start_idx] = 1.0
+                reference_pose[0, out_start_idx+4] = 1.0
+        
+        # Calculate world positions
+        world_positions = self.calculate_world_positions(reference_pose)
+        
+        # Handle different result shapes (with/without batch dimension)
+        if len(world_positions.shape) == 2:  # [batch, joints*3]
+            # Extract positions for the specific joints
+            pos_a = world_positions[0, joint_a_idx*3:(joint_a_idx+1)*3]
+            pos_b = world_positions[0, joint_b_idx*3:(joint_b_idx+1)*3]
+        else:  # [joints*3]
+            pos_a = world_positions[joint_a_idx*3:(joint_a_idx+1)*3]
+            pos_b = world_positions[joint_b_idx*3:(joint_b_idx+1)*3]
+        
+        # Check for NaN values
+        if torch.isnan(pos_a).any() or torch.isnan(pos_b).any():
+            print(f"Warning: NaN detected in joint positions for {joint_a} or {joint_b}")
+            return 0.0  # Return a default value
+            
+        # Calculate Euclidean distance
+        distance = torch.norm(pos_b - pos_a).item()
+        
+        # Check for NaN distance
+        if np.isnan(distance):
+            print(f"Warning: NaN distance between {joint_a} and {joint_b}")
+            return 0.0  # Return a default value
+            
+        return distance

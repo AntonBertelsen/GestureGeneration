@@ -165,7 +165,7 @@ def init_visualization():
         state['visualization_initialized'] = True
 
 def display_viewer():
-    html_file_path = f"http://localhost:{state['http_server_port']}/utils/animation/visualisation/new/animation_viewer.html?wsport={state['websocket_port']}"
+    html_file_path = f"http://localhost:{state['http_server_port']}/utils/animation/visualisation/new/animation_viewer2.html?wsport={state['websocket_port']}"
     print(f"Viewer URL: {html_file_path}")
     
     iframe_html = f'<iframe src="{html_file_path}" width="512" height="512" frameborder="0"></iframe><br>'
