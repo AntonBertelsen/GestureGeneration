@@ -7,6 +7,8 @@ import torch.nn.functional as F
 from pose_encoder.ik_two_bone import IKChain2Bone
 from utils.utils import convert_6d_to_matrix, convert_matrix_to_6d
 
+from pose_encoder.pose_encoder import PoseEncoder
+
 class SimpleEncoder(nn.Module):
     """Simple VAE encoder/decoder."""
     def __init__(self, input_dim: int, z_dim: int):
@@ -54,7 +56,7 @@ class SimpleEncoder(nn.Module):
         eps = torch.randn_like(std)
         return mu + eps * std
 
-class AdvancedPoseEncoder(nn.Module, WnBTrackable):
+class AdvancedPoseEncoder(PoseEncoder):
     def __init__(self, pose_dim=345, component_definitions=None, device=None, checkpoint_path=None, skeleton=None):
         super().__init__()
         if skeleton is None:
@@ -309,12 +311,12 @@ class AdvancedPoseEncoder(nn.Module, WnBTrackable):
             [batch_size, latent_dim] Encoded pose
         """
         batch_size = x.shape[0]
-        z = torch.zeros(batch_size, self.total_z_dim, device=x.device)
+        z = torch.zeros(batch_size, self.total_z_dim, device=x.device, dtype=x.dtype)
 
          # Denormalize the pose for world position calculations
-        # x_denorm = self.skeleton.denormalize_poses(x)
-        x = self.skeleton.denormalize_poses(x)
-        x_denorm = x.clone()
+        x_denorm = self.skeleton.denormalize_poses(x)
+        # x = self.skeleton.denormalize_poses(x)
+        # x_denorm = x.clone()
         
         # First, calculate world positions for the entire pose
         world_positions, world_rotations_dict = self.skeleton.calculate_world_positions(x_denorm, return_rotations=True)
@@ -380,12 +382,19 @@ class AdvancedPoseEncoder(nn.Module, WnBTrackable):
                     origin_pos, joint1_rot, joint2_rot, parent_rot, twist_rot
                 )
 
+                # TODO: Maybe we should use this instead of the above? it may be more accurate (and performant)
                 # end_effector_pos, swivel = self.ik_chains[name].world_positions_to_ik(
                 #     origin_pos, elbow_pos, end_effector_pos
                 # )
+
+                # The extracted end_effector_pos is in world space. We want to z-normalize it
+                # We have to do this manually because the skeleton's denormalize_poses expects a full pose
+                mean = self.skeleton.world_pos_mean_pose[end_effector_idx*3:end_effector_idx*3+3]
+                std = self.skeleton.world_pos_std_pose[end_effector_idx*3:end_effector_idx*3+3]
+                normalized_end_effector_pos = (end_effector_pos - mean) / std
                 
                 # Store the world space target position and swivel
-                z[:, z_idx:z_idx+3] = end_effector_pos  # Store world space target
+                z[:, z_idx:z_idx+3] = normalized_end_effector_pos  # Store world space target
                 z[:, z_idx+3:z_idx+4] = torch.clamp(swivel, -1.0, 1.0)  # Clamp swivel to [-1, 1]
                 z_idx += 4
 
@@ -418,7 +427,7 @@ class AdvancedPoseEncoder(nn.Module, WnBTrackable):
     def decode(self, z):
         """Decode latent space back to pose with properly positioned IK chains."""
         batch_shape = z.shape[:-1]
-        output = torch.zeros(batch_shape + (self.pose_dim,), device=z.device)
+        output = torch.zeros(batch_shape + (self.pose_dim,), device=z.device, dtype=z.dtype)
         
         start_idx = 0
         
@@ -435,16 +444,18 @@ class AdvancedPoseEncoder(nn.Module, WnBTrackable):
             if comp['type'] == 'encode':
                 size = comp['z_dim']
                 latent = z[..., start_idx:start_idx+size]
-                decoded = self.encoders[name].decode(latent)
+                decoded = self.encoders[name].decode(latent).to(z.dtype)
                 output[..., comp['indices']] = decoded
                 start_idx += size
         
         # # preserved components and auto-encoded components work with normalized poses. But to do IK we need unnormalized poses
         # So we denormalize everything here, and then we will normalize again at the end when we're done with IK
-        # output = self.skeleton.denormalize_poses(output)
+        print("output.dtype", output.dtype)
+        output = self.skeleton.denormalize_poses(output)
+        print("output.dtype after denormalization", output.dtype)
 
+        # TODO: Find a better way to do this
         for idx in self.unhandled_indices:
-            # TODO: Uderstand what is happening here. Why does identity not work, but this combination does?
             remainder = idx % 6
             if remainder == 0:  # First element of first column (0,1,0)
                 output[..., idx] = 0.0
@@ -463,14 +474,8 @@ class AdvancedPoseEncoder(nn.Module, WnBTrackable):
         for name, comp in self.components.items():
             if comp['type'] == 'ik':
                 indices = comp['joint_indices']
-                if len(indices) >= 12:
-                    # Set identity rotation for first joint
-                    output[..., indices[0]] = 1.0  # First element of 6D rotation = [1,0,0,0,1,0]
-                    output[..., indices[4]] = 1.0  # Fifth element of 6D rotation
-                    
-                    # Set identity rotation for second joint
-                    output[..., indices[6]] = 1.0  # First element of 6D rotation
-                    output[..., indices[10]] = 1.0  # Fifth element of 6D rotation
+                output[..., indices[:6]] = torch.tensor([1.0, 0.0, 0.0, 0.0, 1.0, 0.0], device=z.device, dtype=z.dtype)  # Temporary identity rotation
+                output[..., indices[6:12]] = torch.tensor([1.0, 0.0, 0.0, 0.0, 1.0, 0.0], device=z.device, dtype=z.dtype)  # Temporary identity rotation
             
         # 4. Calculate world positions with pre-ik pose.
         # We need to do this so we can get the origin positions and world rotations for IK chains
@@ -484,10 +489,22 @@ class AdvancedPoseEncoder(nn.Module, WnBTrackable):
         for name, comp in self.components.items():
             if comp['type'] == 'ik':
                 # Extract position and swivel
-                target_pos = z[..., start_idx:start_idx+3]
+                normalized_target_pos = z[..., start_idx:start_idx+3]
                 swivel = z[..., start_idx+3:start_idx+4]
                 start_idx += 4
                 
+                # The stored target pos is z-normalized, so we need to denormalize it
+                # Get end effector index for denormalization
+                end_effector_joint = comp['chain_info']['end_effector']
+                end_effector_idx = self.joint_name_to_world_pos_idx[end_effector_joint]
+
+                # Get the mean and std for the end effector position
+                mean = self.skeleton.world_pos_mean_pose[end_effector_idx*3:end_effector_idx*3+3]
+                std = self.skeleton.world_pos_std_pose[end_effector_idx*3:end_effector_idx*3+3]
+
+                # Denormalize the target position
+                target_pos = normalized_target_pos * std + mean
+
                 # Get chain origin joint name and find its world position
                 origin_joint = comp['chain_info']['chain_joints'][0]
                 origin_idx = self.joint_name_to_world_pos_idx[origin_joint]
@@ -517,8 +534,8 @@ class AdvancedPoseEncoder(nn.Module, WnBTrackable):
                 # Place results in output tensor
                 indices = comp['joint_indices']
                 if len(indices) >= 12:
-                    output[..., indices[:6]] = rot1_6d
-                    output[..., indices[6:12]] = rot2_6d
+                    output[..., indices[:6]] = rot1_6d.to(z.dtype)
+                    output[..., indices[6:12]] = rot2_6d.to(z.dtype)
 
         for name, comp in self.components.items():
             if comp['type'] == 'world_preserve_after_ik':
@@ -551,7 +568,7 @@ class AdvancedPoseEncoder(nn.Module, WnBTrackable):
                 indices = comp['indices']
                 
                 # print(f"  Storing local rotation 6D at indices {indices[:6]}")
-                output[..., indices[:6]] = local_rot_6d
+                output[..., indices[:6]] = local_rot_6d.to(z.dtype)
 
         
         # Now we need to normalize the output pose again

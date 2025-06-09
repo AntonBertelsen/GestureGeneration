@@ -217,7 +217,7 @@ class Skeleton:
     def denormalize_poses(self, pose: torch.Tensor) -> torch.Tensor:
         """Denormalize the pose using mean and std."""
         if self.mean_pose is not None and self.std_pose is not None:
-            return pose * self.std_pose + self.mean_pose
+            return pose * self.std_pose.to(pose.dtype) + self.mean_pose.to(pose.dtype)
         return pose
     
     def normalize_world_positions(self, world_positions: torch.Tensor) -> torch.Tensor:

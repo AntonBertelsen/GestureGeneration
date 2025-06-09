@@ -301,14 +301,7 @@ class IKChain2Bone:
         if twist_rot is not None:
             # Since twist is a child of the first bone in the hierarchy, 
             # multiply rot1 * twist_rot to get combined effect
-
-            print("TWIST ROTATION DETECTED")
-
-            print(f"rot1: {rot1.shape}, twist_rot: {twist_rot.shape}")
-
             combined_rot1 = torch.matmul(rot1, twist_rot)
-
-            print(f"combined_rot1: {combined_rot1.shape}")
         else:
             combined_rot1 = rot1
 

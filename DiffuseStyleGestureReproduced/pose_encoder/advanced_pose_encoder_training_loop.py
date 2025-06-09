@@ -17,13 +17,11 @@ def train_advanced_encoder(
         warm_up_kl_anneal_steps=100,
         kl_anneal_steps=300,
         kl_beta=0.0001,
+        category_weighting={},
         visualize_steps=10,
-        name="advanced_pose_encoder",
+        model_name="advanced_pose_encoder",
         display_progress=True
     ):
-    # Optimization: Turn off anomaly detection for faster training after initial debugging
-    # torch.autograd.set_detect_anomaly(True)
-    
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
     model.to(device)
 
@@ -37,7 +35,6 @@ def train_advanced_encoder(
         component_losses[name] = []
 
     if run is not None:
-        # Set up logging config
         run_config = {
             "learning_rate": learning_rate,
             "num_epochs": num_epochs,
@@ -67,8 +64,11 @@ def train_advanced_encoder(
         
         progress_bar = tqdm(pose_training_loader, desc=f'Epoch {epoch+1}/{num_epochs}', leave=True)
         
+        # For visualization, track the last batch's data
+        visualization_data = None
+        
         for batch_idx, batch_data in enumerate(progress_bar):
-            # Extract pose data from batch (handles different dataset formats)
+            # Extract pose data
             if len(batch_data) >= 4:
                 pose, _, _, _ = [item.squeeze(0).squeeze(1).to(device) for item in batch_data]
             else:
@@ -80,7 +80,6 @@ def train_advanced_encoder(
             # Reset gradients
             optimizer.zero_grad()
             
-            # NEW APPROACH: Train only the encoder components directly
             total_loss = 0
             total_recon_loss = 0
             total_kl_loss = 0
@@ -89,9 +88,11 @@ def train_advanced_encoder(
             kl_intensity = min(1.0, max(0.0, (epoch - warm_up_kl_anneal_steps)) / kl_anneal_steps)
             kl_weight = kl_beta * kl_intensity
             
-            # Track mu/logvar for visualization
+            # Track mu/logvar and component data for visualization
             all_mu = []
             all_logvar = []
+            component_originals = {}
+            component_reconstructions = {}
             
             # Process each encoder component separately
             for name, encoder in model.encoders.items():
@@ -100,7 +101,7 @@ def train_advanced_encoder(
                 indices = comp['indices']
                 
                 # Extract relevant part of the pose for this component
-                component_input = pose[:, indices].clone()  # Clone to avoid in-place modifications
+                component_input = pose[:, indices].clone()
                 
                 # Encode
                 mu, logvar = encoder.encode(component_input, return_logvar=True)
@@ -115,9 +116,14 @@ def train_advanced_encoder(
                 # Decode
                 component_reconstruction = encoder.decode(z)
                 
+                # Store component data for visualization
+                component_originals[name] = component_input
+                component_reconstructions[name] = component_reconstruction
+                
+                # Calculate reconstruction loss
                 component_recon_loss = nn.HuberLoss(reduction="mean")(component_reconstruction, component_input)
                 
-                # Compute KL loss for this component
+                # Compute KL loss
                 kl_per_dim = -0.5 * (1 + logvar - mu.pow(2) - logvar.exp())
                 kl_loss = kl_per_dim.mean(dim=0).sum()
                 
@@ -139,6 +145,15 @@ def train_advanced_encoder(
             train_reconstruction_loss += total_recon_loss
             train_kl_loss += total_kl_loss * kl_weight
             
+            # Save visualization data from last batch
+            if batch_idx == len(progress_bar) - 1:
+                visualization_data = {
+                    'component_originals': component_originals,
+                    'component_reconstructions': component_reconstructions,
+                    'all_mu': all_mu,
+                    'all_logvar': all_logvar
+                }
+            
             # Update the progress bar
             active_dims_count = sum((mu.var(dim=0) > 0.01).sum().item() for mu in all_mu)
             total_dims = sum(len(mu[0]) for mu in all_mu)
@@ -149,20 +164,8 @@ def train_advanced_encoder(
                 "KL": f"{(total_kl_loss * kl_weight):.6f}",
                 "Active": f"{active_dims_count}/{total_dims}"
             })
-            
-            # For visualization, we'll need to create full reconstructed pose - but only in visualization epochs
-            if epoch % visualize_steps == 0 and display_progress and batch_idx == len(progress_bar) - 1:
-                # This is just for visualization, not for training
-                with torch.no_grad():
-                    try:
-                        # Get full pose reconstruction from the model
-                        z = model.encode(pose)
-                        x_reconstructed = model.decode(z)
-                    except:
-                        x_reconstructed = pose.clone()  # Fallback if model.decode fails
         
         # Store epoch losses
-        dataset_size = len(pose_training_loader.dataset) if hasattr(pose_training_loader.dataset, '__len__') else len(pose_training_loader)
         losses.append(train_loss / len(pose_training_loader))
         reconstruction_losses.append(train_reconstruction_loss / len(pose_training_loader))
         kl_losses.append(train_kl_loss / len(pose_training_loader))
@@ -170,7 +173,7 @@ def train_advanced_encoder(
         for name in model.encoders.keys():
             component_losses[name].append(component_epoch_losses[name] / len(pose_training_loader))
         
-        # Log metrics if run is provided
+        # Log metrics
         if run is not None:
             run_logs = {
                 "loss": losses[-1],
@@ -184,14 +187,14 @@ def train_advanced_encoder(
             run.log(run_logs)
 
         # Visualize training progress
-        if epoch % visualize_steps == 0 and display_progress and not is_running_on_slurm():
+        if epoch % visualize_steps == 0 and display_progress and not is_running_on_slurm() and visualization_data:
             try:
-                visualize_advanced_training(
+                visualize_component_training(
                     model,
-                    pose,
-                    x_reconstructed if 'x_reconstructed' in locals() else pose.clone(),
-                    all_mu,
-                    all_logvar,
+                    visualization_data['component_originals'],
+                    visualization_data['component_reconstructions'],
+                    visualization_data['all_mu'],
+                    visualization_data['all_logvar'],
                     losses,
                     reconstruction_losses,
                     kl_losses,
@@ -202,14 +205,14 @@ def train_advanced_encoder(
 
     # Save the trained model
     os.makedirs("pose_encoder/models", exist_ok=True)
-    torch.save(model.state_dict(), f"pose_encoder/models/{name}.pth")
-    print(f"Model saved to pose_encoder/models/{name}.pth")
+    torch.save(model.state_dict(), f"pose_encoder/models/{model_name}.pth")
+    print(f"Model saved to pose_encoder/models/{model_name}.pth")
     return model
 
-def visualize_advanced_training(
+def visualize_component_training(
         model,
-        pose,
-        x_reconstructed,
+        component_originals,
+        component_reconstructions,
         all_mu,
         all_logvar,
         losses,
@@ -217,47 +220,88 @@ def visualize_advanced_training(
         kl_losses,
         component_losses
     ):
-    """Visualize training progress for advanced encoder."""
+    """Visualize training progress for component encoders."""
     with torch.no_grad():
         clear_output(wait=True)
         
-        # Plot pose reconstructions
-        plt.figure(figsize=(10, 5))
-        plt.subplot(2, 3, 1)
-        plt.title("Original Pose")
-        plt.imshow(pose[0].repeat(200,1).cpu().detach().numpy(), cmap='viridis', vmin=-3, vmax=3)
+        # Create concatenated views of original and reconstructed parts
+        component_names = list(component_originals.keys())
         
-        plt.subplot(2, 3, 2)
-        plt.title("Reconstructed Pose")
-        plt.imshow(x_reconstructed[0].repeat(200,1).cpu().detach().numpy(), cmap='viridis', vmin=-3, vmax=3)
+        # Get sample from first batch for visualization
+        stacked_originals = torch.cat([component_originals[name][0] for name in component_names], dim=0)
+        stacked_reconstructions = torch.cat([component_reconstructions[name][0] for name in component_names], dim=0)
+        stacked_difference = stacked_originals - stacked_reconstructions
+        
+        # Plot component reconstructions
+        plt.figure(figsize=(15, 5))
+        plt.subplot(1, 3, 1)
+        plt.title("Original Components")
+        plt.imshow(stacked_originals.unsqueeze(0).repeat(100, 1).cpu().numpy(), 
+                  cmap='viridis', aspect='auto', vmin=-3, vmax=3)
+        
+        plt.subplot(1, 3, 2)
+        plt.title("Reconstructed Components")
+        plt.imshow(stacked_reconstructions.unsqueeze(0).repeat(100, 1).cpu().numpy(), 
+                  cmap='viridis', aspect='auto', vmin=-3, vmax=3)
 
-        difference = pose[0] - x_reconstructed[0]
-        plt.subplot(2, 3, 3)
+        plt.subplot(1, 3, 3)
         plt.title("Difference")
-        plt.imshow(difference.repeat(200,1).cpu().detach().numpy(), cmap='viridis', vmin=-3, vmax=3)
+        plt.imshow(stacked_difference.unsqueeze(0).repeat(100, 1).cpu().numpy(), 
+                  cmap='coolwarm', aspect='auto', vmin=-1, vmax=1)
         
-        # Plot latent variables if we have them
-        if all_mu and len(all_mu) > 0:
-            try:
-                combined_mu = torch.cat([mu[0] for mu in all_mu], dim=0)
-                combined_logvar = torch.cat([logvar[0] for logvar in all_logvar], dim=0)
-                
-                plt.subplot(2, 3, 4)
-                plt.title("Latent Space (mu)")
-                plt.imshow(combined_mu.unsqueeze(0).repeat(20,1).cpu().detach().numpy(), cmap='viridis', vmin=-3, vmax=3)
-
-                plt.subplot(2, 3, 5)
-                plt.title("Latent Space (logvar)")
-                plt.imshow(combined_logvar.unsqueeze(0).repeat(20,1).cpu().detach().numpy(), cmap='viridis', vmin=-3, vmax=3)
-            except:
-                pass
-                
+        # Add component labels
+        component_widths = [len(component_originals[name][0]) for name in component_names]
+        component_positions = [sum(component_widths[:i]) + component_widths[i]/2 for i in range(len(component_widths))]
+        
+        for ax_idx in [0, 1, 2]:
+            plt.subplot(1, 3, ax_idx+1)
+            for i, name in enumerate(component_names):
+                plt.axvline(x=sum(component_widths[:i]), color='white', linestyle='--', alpha=0.5)
+                plt.text(component_positions[i], 90, name, 
+                        horizontalalignment='center', verticalalignment='center', 
+                        rotation=90, color='white', fontsize=8)
+        
         plt.tight_layout()
         plt.show()
         
+        # Plot latent spaces
+        if all_mu and len(all_mu) > 0:
+            plt.figure(figsize=(12, 4))
+            
+            # Plot combined latent mu for all components
+            plt.subplot(1, 2, 1)
+            plt.title("Latent Space (mu)")
+            
+            # Calculate positions for component labels
+            z_dims = [mu.shape[1] for mu in all_mu]
+            z_positions = [sum(z_dims[:i]) + z_dims[i]/2 for i in range(len(z_dims))]
+            
+            # Stack all mu values for visualization
+            stacked_mu = torch.cat([mu[0] for mu in all_mu], dim=0).cpu().numpy()
+            plt.bar(range(len(stacked_mu)), stacked_mu)
+            plt.grid(True, alpha=0.3)
+            
+            # Add component dividers and labels
+            for i, name in enumerate(component_names):
+                plt.axvline(x=sum(z_dims[:i])-0.5, color='red', linestyle='--', alpha=0.5)
+                plt.text(z_positions[i], min(stacked_mu)-0.5, name, 
+                        horizontalalignment='center', color='red', fontsize=8)
+            
+            # KL loss per component
+            plt.subplot(1, 2, 2)
+            plt.title("Component KL Losses")
+            for name, loss_values in component_losses.items():
+                if loss_values:  # Check if list is not empty
+                    plt.plot(loss_values, label=name)
+            plt.xlabel("Epoch")
+            plt.ylabel("KL Loss")
+            plt.legend()
+            
+            plt.tight_layout()
+            plt.show()
+        
         # Draw the training loss
-        plt.figure(figsize=(12, 6))
-        plt.subplot(1, 2, 1)
+        plt.figure(figsize=(12, 4))
         plt.plot(losses, label="Total Loss", color="blue")
         plt.plot(reconstruction_losses, label="Reconstruction Loss", color="green")
         plt.plot(kl_losses, label="KL Loss", color="red")
@@ -265,18 +309,7 @@ def visualize_advanced_training(
         plt.xlabel("Epoch")
         plt.ylabel("Loss")
         plt.legend()
-        
-        # Draw component-specific losses
-        if component_losses:
-            plt.subplot(1, 2, 2)
-            for name, comp_loss in component_losses.items():
-                if comp_loss:  # Check if list is not empty
-                    plt.plot(comp_loss, label=name)
-            plt.title("Component KL Losses")
-            plt.xlabel("Epoch")
-            plt.ylabel("KL Loss")
-            plt.legend()
-            
+        plt.grid(True, alpha=0.3)
         plt.tight_layout()
         plt.show()
 
