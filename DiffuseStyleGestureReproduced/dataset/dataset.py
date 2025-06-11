@@ -2,6 +2,7 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 import pickle
+from utils.animation.skeleton import Skeleton
 
 class RAMDataset(Dataset):
     """Dataset that loads consolidated data into RAM and extracts windows on-the-fly"""
@@ -134,7 +135,7 @@ class GPUDataset(Dataset):
         meta_file = consolidated_file.replace('.npz', '_meta.pkl')
         with open(meta_file, 'rb') as f:
             self.metadata = pickle.load(f)
-            self.skeleton = self.metadata['skeleton']
+            self.skeleton: Skeleton = self.metadata['skeleton']
 
             self.skeleton.set_device(device)
             
