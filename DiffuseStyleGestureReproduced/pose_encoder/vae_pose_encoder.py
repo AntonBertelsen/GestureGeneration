@@ -8,15 +8,15 @@ from pose_encoder.pose_encoder import PoseEncoder
 # Another advantage is that the entire latent space becomes continous, and we can essentially sample any point in the latent space and 
 # get a reasonable pose. In a sense it becomes impossible to generate unreasonable poses, since the VAE will always map the latent space to a reasonable pose.
 class VAEPoseEncoder(PoseEncoder):
-    def __init__(self, z_dim=64, pose_dim=345, device=None, checkpoint_path=None):
+    def __init__(self, z_dim=64, pose_dim=345, device=None):
         super(VAEPoseEncoder, self).__init__()
         self.pose_dim = pose_dim
         self.z_dim = z_dim
 
         self.hyperparameter_dict_to_WnB_tracking = {
+            "type": "vae_pose_encoder",
             "z_dim": z_dim,
             "pose_dim": pose_dim,
-            "checkpoint_path": checkpoint_path,
             "activation": "GELU",
             "encoder_layers": [pose_dim, 512, 256, 128],
             "decoder_layers": [z_dim, 128, 256, 512, pose_dim],
@@ -55,10 +55,6 @@ class VAEPoseEncoder(PoseEncoder):
             nn.Linear(512, pose_dim)
         )
 
-        if checkpoint_path is not None:
-            self.load_state_dict(torch.load("pose_encoder/models/" + checkpoint_path, map_location=device))
-            print(f"VAE model loaded from {checkpoint_path}")
-
         if device is not None:
             self.to(device)
 
@@ -89,3 +85,27 @@ class VAEPoseEncoder(PoseEncoder):
 
     def add_hyperparameters_to_WnB_tracking(self, hyperparameter_dict):
         self.hyperparameter_dict_to_WnB_tracking.update(hyperparameter_dict)
+
+    @staticmethod
+    def load_from_checkpoint(checkpoint_name, device=None):
+        checkpoint_path = f"pose_encoder/models/{checkpoint_name}.pth"
+            
+        # Load the saved data
+        checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+        
+        # New format with complete configuration
+        state_dict = checkpoint['state_dict']
+        z_dim = checkpoint['hyperparameters']['z_dim']
+        pose_dim = checkpoint['hyperparameters']['pose_dim']
+        
+        # Create new model instance
+        model = VAEPoseEncoder(
+            z_dim       = z_dim,
+            pose_dim    = pose_dim,
+            device      = device,
+        )
+        
+        # Load the state dict
+        model.load_state_dict(state_dict)
+            
+        return model

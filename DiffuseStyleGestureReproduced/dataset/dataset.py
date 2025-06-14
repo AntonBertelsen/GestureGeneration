@@ -2,6 +2,7 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 import pickle
+from utils.animation.skeleton import Skeleton
 
 class RAMDataset(Dataset):
     """Dataset that loads consolidated data into RAM and extracts windows on-the-fly"""
@@ -118,7 +119,7 @@ class GPUDataset(Dataset):
     """Dataset that keeps data on GPU for maximum performance with vectorized operations"""
     def __init__(self, consolidated_file, seq_length=150, seed_length=0, 
                  batch_size=32, epoch_length=1000, return_audio_frame_index=False,
-                 device=torch.device('cuda'), use_world_pos_gesture_features=False):
+                 device=torch.device('cuda'), use_world_pos_gesture_features=False, loading_encoded_data=False):
         self.seq_length = seq_length
         self.seed_length = seed_length
         self.batch_size = batch_size
@@ -127,6 +128,7 @@ class GPUDataset(Dataset):
         self.return_audio_frame_index = return_audio_frame_index
         self.device = device
         self.use_world_pos_gesture_features = use_world_pos_gesture_features
+        self.loading_encoded_data = loading_encoded_data
         
         print(f"Initializing GPU-resident dataset on {device}")
         
@@ -134,7 +136,7 @@ class GPUDataset(Dataset):
         meta_file = consolidated_file.replace('.npz', '_meta.pkl')
         with open(meta_file, 'rb') as f:
             self.metadata = pickle.load(f)
-            self.skeleton = self.metadata['skeleton']
+            self.skeleton: Skeleton = self.metadata['skeleton']
 
             self.skeleton.set_device(device)
             
@@ -251,11 +253,14 @@ class GPUDataset(Dataset):
         audio_batch = self.audio[gesture_indices]  # Shape: [batch_size, seq_length, audio_dim]
         speaker_batch = self.speakers[segment_indices]  # Shape: [batch_size, speaker_dim]
         
-        # TODO: I think this should not be here, but instead be handled by the user after the data is retrieved
-        if not self.use_world_pos_gesture_features:
+        if not self.loading_encoded_data:
             # Apply z-score normalization
-            gesture_batch = (gesture_batch - self.mean_pose) / self.std_pose
-            seed_batch = (seed_batch - self.mean_pose) / self.std_pose
+            if self.use_world_pos_gesture_features:
+                gesture_batch = self.skeleton.normalize_world_positions(gesture_batch)
+                seed_batch = self.skeleton.normalize_world_positions(seed_batch)
+            else:
+                gesture_batch = self.skeleton.normalize_poses(gesture_batch)
+                seed_batch = self.skeleton.normalize_poses(seed_batch)
         
         if self.return_audio_frame_index:
             # Return the start frame index for the audio snippet

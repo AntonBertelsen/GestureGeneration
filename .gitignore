@@ -182,13 +182,7 @@ DiffuseStyleGestureReproduced/dataset/genea2023_dataset/trn/**/features/
 DiffuseStyleGestureReproduced/dataset/genea2023_dataset/*
 DiffuseStyleGestureReproduced/dataset/
 
-
-# Ignore everything in models:
-DiffuseStyleGestureReproduced/v1_models/
-
 # Ignore everything in FDG:
-DiffuseStyleGestureReproduced/FGD/models/*
-
 DiffuseStyleGestureReproduced/dataset/wandb/
 
 
@@ -200,9 +194,7 @@ DiffuseStyleGestureReproduced/bvh_tests/results/*
 DiffuseStyleGestureReproduced/bvh_testsfeatures/*
 DiffuseStyleGestureReproduced/bvh_tests/bvh/*
 
-
 .DS_Store
-DiffuseStyleGestureReproduced/dataset/genea2023_dataset/trn/main-agent/features/trn_2023_v0_000.npz
 
 DiffuseStyleGestureReproduced/v1_models/
 DiffuseStyleGestureReproduced/pose_encoder/models/

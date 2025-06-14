@@ -34,36 +34,56 @@ class IKChain2Bone:
             joint2: [B, 3] End effector position
         """
         batch_size = start_pos.shape[0]
-
+    
+        # Calculate vector and distance with safety clamp
         vec = target_pos - start_pos
-        dist = torch.norm(vec, dim=1, keepdim=True)
+        
+        # Use a safer norm calculation with min bound
+        eps = 1e-8
+        dist_squared = torch.sum(vec * vec, dim=1, keepdim=True)
+        dist = torch.sqrt(dist_squared.clamp(min=eps))
         max_reach = self.l1 + self.l2
-
-        # Clamp distance
-        too_far_idx = (dist > max_reach).squeeze(1)  # Convert to [B] for indexing
-        if too_far_idx.any():
-            vec[too_far_idx] = vec[too_far_idx] / dist[too_far_idx] * max_reach
-            dist[too_far_idx] = max_reach
-            
-        too_close_idx = (dist < 1e-6).squeeze(1)  # Convert to [B] for indexing
-        if too_close_idx.any():
-            # Set a small default direction for degenerate cases
-            default_dir = torch.zeros_like(vec)
-            default_dir[:, 2] = 1.0  # Use Z direction as default
-            vec[too_close_idx] = default_dir[too_close_idx] * 1e-6
-            dist[too_close_idx] = 1e-6
-
-        dir = vec / dist
-
-        # Law of cosines
-        cos_theta = (self.l1**2 + dist**2 - self.l2**2) / (2 * self.l1 * dist)
-        cos_theta = torch.clamp(cos_theta, -1.0, 1.0)
+        
+        # Create safe masks (no gradients through the conditions)
+        with torch.no_grad():
+            too_far = dist > max_reach
+            too_close = dist < 1e-6
+        
+        # Handle out-of-range cases with stable operations
+        # For vectors that are too far
+        safe_dir = F.normalize(vec, dim=1, eps=eps)
+        scaled_vecs = safe_dir * max_reach
+        
+        # For vectors that are too close (degenerate case)
+        default_dir = torch.zeros_like(vec)
+        default_dir[:, 2] = 1.0
+        default_vec = F.normalize(default_dir, dim=1, eps=eps) * 1e-6
+        
+        # Apply masks one at a time
+        vec = torch.where(too_far, scaled_vecs, vec)
+        vec = torch.where(too_close, default_vec, vec)
+        
+        # Recalculate distance and direction safely
+        dist_squared = torch.sum(vec * vec, dim=1, keepdim=True)
+        dist = torch.sqrt(dist_squared.clamp(min=eps))
+        dir = F.normalize(vec, dim=1, eps=eps)
+        
+        # Law of cosines with safety bounds
+        cos_arg = (self.l1**2 + dist**2 - self.l2**2) / (2 * self.l1 * dist).clamp(min=eps)
+        cos_theta = torch.clamp(cos_arg, -0.999, 0.999)  # Avoid exact -1 and 1 for acos
         theta = torch.acos(cos_theta)
-
-        # Orthonormal frame - use bone1_up_dir for swivel reference
+        
+        # Safe orthonormal frame calculation
         up_dir_batch = self.bone1_up_dir.unsqueeze(0).expand(batch_size, 3)
-        right = F.normalize(torch.cross(up_dir_batch, dir, dim=1), dim=1)
-        up_proj = F.normalize(torch.cross(dir, right, dim=1), dim=1)
+        
+        # Create safe cross products
+        cross1 = torch.cross(up_dir_batch, dir, dim=1)
+        right_norm = torch.norm(cross1, dim=1, keepdim=True).clamp(min=eps)
+        right = cross1 / right_norm
+        
+        cross2 = torch.cross(dir, right, dim=1)
+        up_norm = torch.norm(cross2, dim=1, keepdim=True).clamp(min=eps)
+        up_proj = cross2 / up_norm
 
         # Swivel direction - 
         if swivel_angle.dim() == 1:
@@ -119,12 +139,7 @@ class IKChain2Bone:
     def rotation_between_vectors(self, v1, v2, up_hint):
         """
         Create rotation matrix that rotates from vector v1 to vector v2
-        while preserving appropriate up direction
-        
-        Args:
-            v1: [B, 3] Source direction (typically rest pose)
-            v2: [B, 3] Target direction (typically current pose)
-            up_hint: [B, 3] Up direction hint for disambiguation
+        while preserving appropriate up direction - vectorized version
         """
         batch_size = v1.shape[0]
         
@@ -135,80 +150,94 @@ class IKChain2Bone:
         # Compute rotation axis and angle
         cos_angle = torch.sum(v1 * v2, dim=1).clamp(-1.0, 1.0)
         
-        # Create result tensor
+        # Create result tensor (identity matrices)
         result = torch.eye(3, device=self.device).unsqueeze(0).expand(batch_size, 3, 3).clone()
         
-        # Compute rotation axis (normalized cross product) for all items
-        # This avoids the boolean indexing issue
+        # Compute rotation axis (normalized cross product)
         axis = torch.cross(v1, v2, dim=1)
         axis_norm = torch.norm(axis, dim=1, keepdim=True)
         
-        # Create a mask for non-parallel vectors (where cross product is meaningful)
+        # Create masks for different cases
         near_parallel = cos_angle.abs() > 0.99999
         non_parallel = ~near_parallel
+        valid_axis = (axis_norm > 1e-6).squeeze(-1)
+        valid_non_parallel = non_parallel & valid_axis
         
         # Handle non-parallel cases (where cross product is valid)
-        if non_parallel.any():
-            # Only normalize and compute for non-parallel vectors
-            valid_axis = (axis_norm > 1e-6).squeeze(-1)
-            valid_non_parallel = non_parallel & valid_axis
+        if valid_non_parallel.any():
+            # Extract valid indices
+            valid_indices = torch.where(valid_non_parallel)[0]
             
-            if valid_non_parallel.any():
-                # For valid cases, compute rotation using Rodrigues formula
-                for i in range(batch_size):
-                    if valid_non_parallel[i]:
-                        angle = torch.acos(cos_angle[i])
-                        axis_normalized = axis[i] / axis_norm[i]
-                        
-                        # Create cross-product matrix for axis vector
-                        K = torch.zeros(3, 3, device=self.device)
-                        x, y, z = axis_normalized[0], axis_normalized[1], axis_normalized[2]
-                        
-                        # Fill cross product matrix
-                        K[0, 1] = -z
-                        K[0, 2] = y
-                        K[1, 0] = z
-                        K[1, 2] = -x
-                        K[2, 0] = -y
-                        K[2, 1] = x
-                        
-                        # Rodrigues formula: I + sin(a)*K + (1-cos(a))*K^2
-                        eye = torch.eye(3, device=self.device)
-                        result[i] = eye + torch.sin(angle) * K + (1 - torch.cos(angle)) * torch.matmul(K, K)
+            # Extract data for valid cases
+            valid_cos = cos_angle[valid_indices]
+            valid_axis = axis[valid_indices] / axis_norm[valid_indices]
+            valid_angles = torch.acos(valid_cos)
+            
+            # Create batch of cross-product matrices
+            K = torch.zeros(len(valid_indices), 3, 3, device=self.device)
+            x, y, z = valid_axis[:, 0], valid_axis[:, 1], valid_axis[:, 2]
+            
+            # Fill cross product matrices for all valid cases at once
+            K[:, 0, 1] = -z
+            K[:, 0, 2] = y
+            K[:, 1, 0] = z
+            K[:, 1, 2] = -x
+            K[:, 2, 0] = -y
+            K[:, 2, 1] = x
+            
+            # Rodrigues formula: I + sin(a)*K + (1-cos(a))*K^2
+            eye = torch.eye(3, device=self.device).unsqueeze(0).expand(len(valid_indices), 3, 3)
+            sin_angles = torch.sin(valid_angles).unsqueeze(-1).unsqueeze(-1)
+            cos_angles = torch.cos(valid_angles).unsqueeze(-1).unsqueeze(-1)
+            K_squared = torch.matmul(K, K)
+            
+            # Compute result for valid indices
+            valid_results = eye + sin_angles * K + (1 - cos_angles) * K_squared
+            
+            # Assign back to result tensor
+            result[valid_indices] = valid_results
         
-        # Handle parallel case
-        if near_parallel.any():
-            # For parallel vectors (cos ≈ 1), keep identity matrix
-            # For anti-parallel vectors (cos ≈ -1), rotate 180° around perpendicular axis
-            anti_parallel = near_parallel & (cos_angle < 0)
+        # Handle anti-parallel case
+        anti_parallel = near_parallel & (cos_angle < 0)
+        if anti_parallel.any():
+            # Extract indices where vectors are anti-parallel
+            anti_indices = torch.where(anti_parallel)[0]
             
-            if anti_parallel.any():
-                for i in range(batch_size):
-                    if anti_parallel[i]:
-                        # Find perpendicular axis using up_hint
-                        perp_axis = torch.cross(v1[i], up_hint[i])
-                        perp_norm = torch.norm(perp_axis)
-                        
-                        if perp_norm > 1e-6:
-                            # Create 180° rotation around perpendicular axis
-                            axis = perp_axis / perp_norm
-                            x, y, z = axis[0], axis[1], axis[2]
-                            
-                            # 180° rotation matrix around axis
-                            R = torch.zeros(3, 3, device=self.device)
-                            
-                            # Fill rotation matrix (180° rotation formula)
-                            R[0, 0] = 1 - 2*(y*y + z*z)
-                            R[0, 1] = 2*(x*y)
-                            R[0, 2] = 2*(x*z)
-                            R[1, 0] = 2*(x*y)
-                            R[1, 1] = 1 - 2*(x*x + z*z)
-                            R[1, 2] = 2*(y*z)
-                            R[2, 0] = 2*(x*z)
-                            R[2, 1] = 2*(y*z)
-                            R[2, 2] = 1 - 2*(x*x + y*y)
-                            
-                            result[i] = R
+            # Extract relevant vectors
+            anti_v1 = v1[anti_indices]
+            anti_up = up_hint[anti_indices]
+            
+            # Find perpendicular axes
+            perp_axes = torch.cross(anti_v1, anti_up)
+            perp_norms = torch.norm(perp_axes, dim=1, keepdim=True)
+            
+            # Create mask for valid perpendicular axes
+            valid_perp = (perp_norms > 1e-6).squeeze(-1)
+            
+            if valid_perp.any():
+                # Get indices where perpendicular axis is valid
+                valid_perp_indices = anti_indices[valid_perp]
+                
+                # Normalize axes
+                valid_axes = perp_axes[valid_perp] / perp_norms[valid_perp]
+                x, y, z = valid_axes[:, 0], valid_axes[:, 1], valid_axes[:, 2]
+                
+                # Create rotation matrices (180° rotation around axis)
+                R = torch.zeros(len(valid_perp_indices), 3, 3, device=self.device)
+                
+                # Fill rotation matrices
+                R[:, 0, 0] = 1 - 2*(y*y + z*z)
+                R[:, 0, 1] = 2*(x*y)
+                R[:, 0, 2] = 2*(x*z)
+                R[:, 1, 0] = 2*(x*y)
+                R[:, 1, 1] = 1 - 2*(x*x + z*z)
+                R[:, 1, 2] = 2*(y*z)
+                R[:, 2, 0] = 2*(x*z)
+                R[:, 2, 1] = 2*(y*z)
+                R[:, 2, 2] = 1 - 2*(x*x + y*y)
+                
+                # Assign to result
+                result[valid_perp_indices] = R
         
         return result
 
@@ -252,35 +281,185 @@ class IKChain2Bone:
         
         return joint1, joint2
 
-    def ik_to_fk(self, start_pos, target_pos, swivel_angle, parent_world_rot=None):
-        """
-        Convenience method: IK → FK (rotations)
+    # def ik_to_fk(self, start_pos, target_pos, swivel_angle, parent_world_rot=None):
+    #     """Optimized version of IK to FK conversion"""
+    #     batch_size = start_pos.shape[0]
         
-        Args:
-            start_pos: [B, 3] Starting position
-            target_pos: [B, 3] Target position
-            swivel_angle: [B, 1] or [B] Swivel angle
-            parent_world_rot: [B, 3, 3] World rotation of parent (optional)
-            
-        Returns:
-            rot1: [B, 3, 3] First joint rotation
-            rot2: [B, 3, 3] Second joint rotation
-            joint1: [B, 3] Middle joint position
-            joint2: [B, 3] End joint position
-        """
-        joint1, joint2 = self.ik(start_pos, target_pos, swivel_angle)
-        rot1_world, rot2_world = self.fk_rotations(start_pos, joint1, joint2)
+    #     # Calculate IK joint positions - this part can be optimized further
+    #     joint1, joint2 = self.ik(start_pos, target_pos, swivel_angle)
+        
+    #     # Optimize rotation calculation by computing both bone directions at once
+    #     bone1_dir = joint1 - start_pos
+    #     bone2_dir = joint2 - joint1
+        
+    #     # Normalize both bone directions in one operation
+    #     stacked_dirs = torch.cat([bone1_dir, bone2_dir], dim=0)
+    #     stacked_dirs_norm = torch.norm(stacked_dirs, dim=1, keepdim=True).clamp(min=1e-8)
+    #     stacked_dirs = stacked_dirs / stacked_dirs_norm
+    #     bone1_dir, bone2_dir = stacked_dirs.chunk(2, dim=0)
+        
+    #     # Prepare rest pose directions as batched tensors
+    #     bone1_rest = self.bone1_forward_dir.unsqueeze(0).expand(batch_size, 3)
+    #     bone2_rest = self.bone2_forward_dir.unsqueeze(0).expand(batch_size, 3)
+    #     bone1_up = self.bone1_up_dir.unsqueeze(0).expand(batch_size, 3)
+    #     bone2_up = self.bone2_up_dir.unsqueeze(0).expand(batch_size, 3)
+        
+    #     # Compute rotations more efficiently (replacing rotation_between_vectors)
+    #     rot1_world = self._fast_compute_rotation(bone1_rest, bone1_dir, bone1_up)
+    #     rot2_world = self._fast_compute_rotation(bone2_rest, bone2_dir, bone2_up)
+        
+    #     # Handle parent rotation if provided
+    #     if parent_world_rot is not None:
+    #         # Use batch matrix multiply for all rotations at once
+    #         rot1_local = torch.bmm(parent_world_rot.transpose(-2, -1), rot1_world)
+    #         rot2_local = torch.bmm(rot1_world.transpose(-2, -1), rot2_world)
+    #         return rot1_local, rot2_local, joint1, joint2, rot1_world, rot2_world
 
-        if parent_world_rot is not None:
-            # Local rotation = inverse(parent_world_rot) * world_rot
-            rot1_local = torch.matmul(parent_world_rot.transpose(-2, -1), rot1_world)
-            
-            # Second bone's parent is the first bone
-            rot2_local = torch.matmul(rot1_world.transpose(-2, -1), rot2_world)
-            return rot1_local, rot2_local, joint1, joint2, rot1_world, rot2_world
+    #     return rot1_world, rot2_world, joint1, joint2
 
-        return rot1_world, rot2_world, joint1, joint2
     
+    def _fast_compute_rotation(self, v1, v2, up_hint):
+        """Faster version of rotation_between_vectors for common cases"""
+        batch_size = v1.shape[0]
+        
+        # Compute dot products for all vectors at once
+        cos_angle = torch.sum(v1 * v2, dim=1).clamp(-0.9999, 0.9999)
+        
+        # Only handle the most common case - non-parallel vectors
+        # This avoids expensive branching logic in the original function
+        axis = torch.cross(v1, v2, dim=1)
+        sin_angle = torch.norm(axis, dim=1)
+        
+        # Normalize axis all at once
+        axis = axis / sin_angle.unsqueeze(-1).clamp(min=1e-8)
+        
+        # Compute rotation matrix using Rodrigues formula efficiently
+        K = torch.zeros(batch_size, 3, 3, device=self.device)
+        x, y, z = axis[:, 0], axis[:, 1], axis[:, 2]
+        
+        # Fill cross product matrices in one go using advanced indexing
+        K[:, 0, 1] = -z
+        K[:, 0, 2] = y
+        K[:, 1, 0] = z
+        K[:, 1, 2] = -x
+        K[:, 2, 0] = -y
+        K[:, 2, 1] = x
+        
+        # Vectorize Rodrigues formula: I + sin(θ)*K + (1-cos(θ))*K²
+        angle = torch.acos(cos_angle)
+        sin_angles = torch.sin(angle).unsqueeze(-1).unsqueeze(-1)
+        one_minus_cos = (1 - cos_angle).unsqueeze(-1).unsqueeze(-1)
+        
+        # Compute K² for all matrices at once
+        K_squared = torch.bmm(K, K)
+        
+        # Compute result using broadcasting
+        eye = torch.eye(3, device=self.device).unsqueeze(0).expand(batch_size, 3, 3)
+        result = eye + sin_angles * K + one_minus_cos * K_squared
+        
+        return result
+
+
+    def ik_to_fk(self, start_pos, target_pos, swivel_angle, parent_world_rot=None):
+        """Optimized version that avoids redundant calculations"""
+        return self.combined_ik_rotations(start_pos, target_pos, swivel_angle, parent_world_rot)
+
+
+    def combined_ik_rotations(self, start_pos, target_pos, swivel_angle, parent_world_rot=None):
+        """
+        Combined IK and rotation calculation that avoids redundant computations.
+        Returns everything in one pass: joint positions and rotations.
+        """
+        batch_size = start_pos.shape[0]
+        eps = 1e-8
+        
+        # ---- IK CALCULATION ----
+        # Calculate vector and distance with safety clamp
+        vec = target_pos - start_pos
+        
+        # Compute distance and handle edge cases in one pass
+        dist_squared = torch.sum(vec * vec, dim=1, keepdim=True)
+        dist = torch.sqrt(dist_squared.clamp(min=eps))
+        max_reach = self.l1 + self.l2
+        
+        # Create masks for edge cases (no gradients through conditions)
+        with torch.no_grad():
+            too_far = dist > max_reach
+            too_close = dist < 1e-6
+        
+        # Handle edge cases, normalizing only once
+        safe_dir = vec / dist.clamp(min=eps)
+        scaled_vecs = safe_dir * max_reach
+        
+        # Handle too_close case (degenerate)
+        default_dir = torch.zeros_like(vec)
+        default_dir[:, 2] = 1.0
+        default_dir_norm = torch.norm(default_dir, dim=1, keepdim=True).clamp(min=eps)
+        default_vec = default_dir / default_dir_norm * 1e-6
+        
+        # Apply masks
+        vec = torch.where(too_far, scaled_vecs, vec)
+        vec = torch.where(too_close, default_vec, vec)
+        
+        # Recalculate final distance and direction (necessary for accuracy)
+        dist_squared = torch.sum(vec * vec, dim=1, keepdim=True)
+        dist = torch.sqrt(dist_squared.clamp(min=eps))
+        dir = vec / dist.clamp(min=eps)
+        
+        # Law of cosines
+        cos_arg = (self.l1**2 + dist**2 - self.l2**2) / (2 * self.l1 * dist).clamp(min=eps)
+        cos_theta = torch.clamp(cos_arg, -0.999, 0.999)
+        theta = torch.acos(cos_theta)
+        
+        # Create orthonormal frame - we'll reuse these for rotations
+        up_dir_batch = self.bone1_up_dir.unsqueeze(0).expand(batch_size, 3)
+        
+        # Cross products - reused for both IK and rotation calculation
+        cross1 = torch.cross(up_dir_batch, dir, dim=1)
+        right_norm = torch.norm(cross1, dim=1, keepdim=True).clamp(min=eps)
+        right = cross1 / right_norm
+        
+        cross2 = torch.cross(dir, right, dim=1)
+        up_norm = torch.norm(cross2, dim=1, keepdim=True).clamp(min=eps)
+        up_proj = cross2 / up_norm
+        
+        # Swivel direction
+        if swivel_angle.dim() == 1:
+            swivel_angle = swivel_angle.unsqueeze(1)
+        elbow_dir = torch.cos(swivel_angle) * up_proj + torch.sin(swivel_angle) * right
+        
+        # Joint positions
+        joint1 = start_pos + self.l1 * (cos_theta * dir + torch.sin(theta) * elbow_dir)
+        joint2 = start_pos + vec  # Clamped end
+        
+        # ---- ROTATION CALCULATION ----
+        # Bone directions are already computed during IK
+        bone1_dir = joint1 - start_pos
+        bone1_dir_norm = torch.norm(bone1_dir, dim=1, keepdim=True).clamp(min=eps)
+        bone1_dir = bone1_dir / bone1_dir_norm
+        
+        bone2_dir = joint2 - joint1
+        bone2_dir_norm = torch.norm(bone2_dir, dim=1, keepdim=True).clamp(min=eps)
+        bone2_dir = bone2_dir / bone2_dir_norm
+        
+        # Rest pose directions
+        bone1_rest = self.bone1_forward_dir.unsqueeze(0).expand(batch_size, 3)
+        bone2_rest = self.bone2_forward_dir.unsqueeze(0).expand(batch_size, 3)
+        bone1_up = self.bone1_up_dir.unsqueeze(0).expand(batch_size, 3)
+        bone2_up = self.bone2_up_dir.unsqueeze(0).expand(batch_size, 3)
+        
+        # Compute world rotations directly
+        rot1_world = self._fast_compute_rotation(bone1_rest, bone1_dir, bone1_up)
+        rot2_world = self._fast_compute_rotation(bone2_rest, bone2_dir, bone2_up)
+        
+        # Handle parent rotation
+        if parent_world_rot is not None:
+            rot1_local = torch.bmm(parent_world_rot.transpose(-2, -1), rot1_world)
+            rot2_local = torch.bmm(rot1_world.transpose(-2, -1), rot2_world)
+            return rot1_local, rot2_local, joint1, joint2, rot1_world, rot2_world
+        
+        return rot1_world, rot2_world, joint1, joint2
+
     def fk_to_ik(self, start_pos, rot1, rot2, parent_world_rot=None, twist_rot=None):
         """
         Convert FK parameters to IK parameters.

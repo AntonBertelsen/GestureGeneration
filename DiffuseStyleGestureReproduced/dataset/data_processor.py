@@ -9,13 +9,15 @@ import yaml
 import argparse
 
 class DataProcessor:
-    def __init__(self, bvh_dir, wav_dir, metadata_file, output_dir, skeleton_config_file):
+    def __init__(self, bvh_dir, wav_dir, metadata_file, output_dir, skeleton_config_file, normalization_meta_path=None):
         self.bvh_dir = bvh_dir
         self.wav_dir = wav_dir
         self.metadata_file = metadata_file
         self.output_dir = output_dir
         self.features_dir = os.path.join(output_dir, "features")
-        
+        self.normalization_meta_path = normalization_meta_path  # Path to training meta data for normalization
+        self.normalization_data = None  # Will hold normalization parameters
+
         # Ensure the directory exists and is writable
         try:
             os.makedirs(self.features_dir, exist_ok=True)
@@ -35,7 +37,22 @@ class DataProcessor:
         
         # Skeleton definition
         self.skeleton = None
+
+        # Load normalization parameters if provided
+        if self.normalization_meta_path and os.path.exists(self.normalization_meta_path):
+            self._load_normalization_parameters()
     
+    def _load_normalization_parameters(self):
+        """Load normalization parameters from training metadata file"""
+        print(f"Loading normalization parameters from {self.normalization_meta_path}")
+        try:
+            with open(self.normalization_meta_path, 'rb') as f:
+                self.normalization_data = pickle.load(f)
+            print("Successfully loaded normalization parameters")
+        except Exception as e:
+            print(f"Error loading normalization parameters: {e}")
+            self.normalization_data = None
+
     def _load_skeleton_config(self, skeleton_config_file):
         """Load skeleton configuration from YAML file"""
         try:
@@ -227,76 +244,103 @@ class DataProcessor:
                 onsets[start:end] = npz["onsets_features"][:frames]
                 # wavlm_features[start:end] = npz["wavlm_features"][:frames]
 
-        # Calculate statistics
         print("Normalizing data...")
 
-        print("Calculating mean and std for gestures")
-        gestures_f64 = gestures.astype(np.float64) # Convert to float64 to avoid overflow issues when calculating mean and std which happens on large datasets
-        mean_pose = np.mean(gestures_f64, axis=0)
-        std_pose = np.sqrt(np.mean((gestures_f64 - mean_pose)**2, axis=0, dtype=np.float64)) # This is supposed to be more numerically stable than std = np.std(gestures_f64, axis=0)
-        std_pose[std_pose == 0] = 1.0
+        # Apply log compression to mel_spec
+        mel_spec = np.log1p(mel_spec)
 
         # We need to calculate world positions for the skeleton to be able to calculate the mean and std, which is used for FGD.
         world_pos_gestures = self.skeleton.calculate_world_positions(gestures).numpy()
 
-        world_pos_gestures_f64 = world_pos_gestures.astype(np.float64) # Convert to float64 to avoid overflow issues when calculating mean and std which happens on large datasets
-        world_pos_mean_pose = np.mean(world_pos_gestures_f64, axis=0)
-        world_pos_std_pose = np.sqrt(np.mean((world_pos_gestures_f64 - world_pos_mean_pose)**2, axis=0, dtype=np.float64)) # This is supposed to be more numerically stable than std = np.std(gestures_f64, axis=0)
-        world_pos_std_pose[world_pos_std_pose == 0] = 1.0
+        # If normalization parameters are provided, use them
+        if self.normalization_data:
+            print("Using pre-calculated normalization parameters from training data")
+            mean_pose = self.normalization_data['mean_pose']
+            std_pose = self.normalization_data['std_pose']
+            world_pos_mean_pose = self.normalization_data.get('world_pos_mean_pose', None)
+            world_pos_std_pose = self.normalization_data.get('world_pos_std_pose', None)
+            mel_spec_min = self.normalization_data['mel_spec_min']
+            mel_spec_max = self.normalization_data['mel_spec_max']
+            mel_spec_range = self.normalization_data['mel_spec_range']
+            mfcc_mean = self.normalization_data['mfcc_mean']
+            mfcc_std = self.normalization_data['mfcc_std']
+            rms_energy_mean = self.normalization_data['rms_energy_mean']
+            rms_energy_std = self.normalization_data['rms_energy_std']
+            pitch_mean = self.normalization_data['pitch_mean']
+            pitch_std = self.normalization_data['pitch_std']
+            energy_derivatives_mean = self.normalization_data['energy_derivatives_mean']
+            energy_derivatives_std = self.normalization_data['energy_derivatives_std']
+            pitch_derivatives_mean = self.normalization_data['pitch_derivatives_mean']
+            pitch_derivatives_std = self.normalization_data['pitch_derivatives_std']
+        else:
+            print("Calculating mean and std for gestures")
+            gestures_f64 = gestures.astype(np.float64) # Convert to float64 to avoid overflow issues when calculating mean and std which happens on large datasets
+            mean_pose = np.mean(gestures_f64, axis=0)
+            std_pose = np.sqrt(np.mean((gestures_f64 - mean_pose)**2, axis=0, dtype=np.float64)) # This is supposed to be more numerically stable than std = np.std(gestures_f64, axis=0)
+            std_pose[std_pose == 0] = 1.0
+
+        
+            world_pos_gestures_f64 = world_pos_gestures.astype(np.float64) # Convert to float64 to avoid overflow issues when calculating mean and std which happens on large datasets
+            world_pos_mean_pose = np.mean(world_pos_gestures_f64, axis=0)
+            world_pos_std_pose = np.sqrt(np.mean((world_pos_gestures_f64 - world_pos_mean_pose)**2, axis=0, dtype=np.float64)) # This is supposed to be more numerically stable than std = np.std(gestures_f64, axis=0)
+            world_pos_std_pose[world_pos_std_pose == 0] = 1.0
+
+            # mel_spec uses log compression and then min-max normalization
+            print("normalizing mel_spec")
+            mel_spec_min = np.min(mel_spec, axis=0)
+            mel_spec_max = np.max(mel_spec, axis=0)
+            
+            mel_spec_range = mel_spec_max - mel_spec_min
+            mel_spec_range[mel_spec_range == 0] = 1.0
+
+            print("normalizing mfcc")
+            mfcc_f64 = mfcc.astype(np.float64) # Convert to float64 to avoid overflow issues when calculating mean and std which happens on large datasets
+            mfcc_mean = np.mean(mfcc_f64, axis=0)
+            mfcc_std = np.std(mfcc_f64, axis=0)
+            mfcc_std[mfcc_std == 0] = 1.0
+
+            print("normalizing rms_energy")
+            rms_energy_f64 = rms_energy.astype(np.float64) # Convert to float64 to avoid overflow issues when calculating mean and std which happens on large datasets
+            rms_energy_mean = np.mean(rms_energy_f64, axis=0)
+            rms_energy_std = np.std(rms_energy_f64, axis=0)
+            rms_energy_std[rms_energy_std == 0] = 1.0
+        
+            print("normalizing pitch")
+            pitch_f64 = pitch.astype(np.float64) # Convert to float64 to avoid overflow issues when calculating mean and std which happens on large datasets
+            pitch_mean = np.mean(pitch_f64, axis=0)
+            pitch_std = np.std(pitch_f64, axis=0)
+            pitch_std[pitch_std == 0] = 1.0
+        
+            print("normalizing energy_derivatives")
+            energy_derivatives_f64 = energy_derivatives.astype(np.float64) # Convert to float64 to avoid overflow issues when calculating mean and std which happens on large datasets
+            energy_derivatives_mean = np.mean(energy_derivatives_f64, axis=0)
+            energy_derivatives_std = np.std(energy_derivatives_f64, axis=0)
+            energy_derivatives_std[energy_derivatives_std == 0] = 1.0
+
+            pitch_derivatives_f64 = pitch_derivatives.astype(np.float64) # Convert to float64 to avoid overflow issues when calculating mean and std which happens on large datasets
+            pitch_derivatives_mean = np.mean(pitch_derivatives_f64, axis=0)
+            pitch_derivatives_std = np.std(pitch_derivatives_f64, axis=0)
+            pitch_derivatives_std[pitch_derivatives_std == 0] = 1.0
 
         self.skeleton.set_mean_std(mean_pose,std_pose, world_pos_mean_pose, world_pos_std_pose)
 
-        # audio normalisation. Each audio feature is normalized in a slightly different way.
-
-        # mel_spec uses log compression and then min-max normalization
-        print("normalizing mel_spec")
-        mel_spec = np.log1p(mel_spec)
-        mel_spec_min = np.min(mel_spec, axis=0)
-        mel_spec_max = np.max(mel_spec, axis=0)
-        
-        mel_spec_range = mel_spec_max - mel_spec_min
-        mel_spec_range[mel_spec_range == 0] = 1.0
         mel_spec = (mel_spec - mel_spec_min) / mel_spec_range
         mel_spec = mel_spec * 3.0  # Scale to occupy similar space as other features
 
         # mfcc uses z-score normalization
-        print("normalizing mfcc")
-        mfcc_f64 = mfcc.astype(np.float64) # Convert to float64 to avoid overflow issues when calculating mean and std which happens on large datasets
-        mfcc_mean = np.mean(mfcc_f64, axis=0)
-        mfcc_std = np.std(mfcc_f64, axis=0)
-        mfcc_std[mfcc_std == 0] = 1.0
         mfcc = ((mfcc - mfcc_mean) / mfcc_std).astype(np.float16) # Convert back to float16 for efficient storage / transfer
 
         # rms_energy uses z-score normalization
-        print("normalizing rms_energy")
-        rms_energy_f64 = rms_energy.astype(np.float64) # Convert to float64 to avoid overflow issues when calculating mean and std which happens on large datasets
-        rms_energy_mean = np.mean(rms_energy_f64, axis=0)
-        rms_energy_std = np.std(rms_energy_f64, axis=0)
-        rms_energy_std[rms_energy_std == 0] = 1.0
         rms_energy = ((rms_energy - rms_energy_mean) / rms_energy_std).astype(np.float16) # Convert back to float16 for efficient storage / transfer
 
         # pitch uses z-score normalization
-        print("normalizing pitch")
-        pitch_f64 = pitch.astype(np.float64) # Convert to float64 to avoid overflow issues when calculating mean and std which happens on large datasets
-        pitch_mean = np.mean(pitch_f64, axis=0)
-        pitch_std = np.std(pitch_f64, axis=0)
-        pitch_std[pitch_std == 0] = 1.0
         pitch = ((pitch - pitch_mean) / pitch_std).astype(np.float16) # Convert back to float16 for efficient storage / transfer
 
         # energy_derivatives uses z-score normalization
-        print("normalizing energy_derivatives")
-        energy_derivatives_f64 = energy_derivatives.astype(np.float64) # Convert to float64 to avoid overflow issues when calculating mean and std which happens on large datasets
-        energy_derivatives_mean = np.mean(energy_derivatives_f64, axis=0)
-        energy_derivatives_std = np.std(energy_derivatives_f64, axis=0)
-        energy_derivatives_std[energy_derivatives_std == 0] = 1.0
         energy_derivatives = ((energy_derivatives - energy_derivatives_mean) / energy_derivatives_std).astype(np.float16) # Convert back to float16 for efficient storage / transfer
 
         # pitch_derivatives uses z-score normalization
         print("normalizing pitch_derivatives")
-        pitch_derivatives_f64 = pitch_derivatives.astype(np.float64) # Convert to float64 to avoid overflow issues when calculating mean and std which happens on large datasets
-        pitch_derivatives_mean = np.mean(pitch_derivatives_f64, axis=0)
-        pitch_derivatives_std = np.std(pitch_derivatives_f64, axis=0)
-        pitch_derivatives_std[pitch_derivatives_std == 0] = 1.0
         pitch_derivatives = ((pitch_derivatives - pitch_derivatives_mean) / pitch_derivatives_std).astype(np.float16) # Convert back to float16 for efficient storage / transfer
 
         # Onsets have no normalization applied, they are in 0,1 range
@@ -385,6 +429,11 @@ if __name__ == "__main__":
     output_dir = base_dir
     skeleton_config_file = f'dataset/genea2023_dataset/skeleton_config.yaml'
     
-    processor = DataProcessor(bvh_dir, wav_dir, metadata_file, output_dir, skeleton_config_file)
+     # Only use training normalization for non-training datasets
+    normalization_meta_path = None
+    if dataset_type != "trn":
+        normalization_meta_path = 'dataset/genea2023_dataset/trn/main-agent/consolidated_meta.pkl'
+
+    processor = DataProcessor(bvh_dir, wav_dir, metadata_file, output_dir, skeleton_config_file, normalization_meta_path)
     processor.process_files()
     processor.create_consolidated_data()

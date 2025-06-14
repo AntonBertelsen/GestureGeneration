@@ -1,11 +1,10 @@
+import time
 import torch
 import torch.nn as nn
-import numpy as np
 from typing import Dict, List
-from utils.WnB_trackable import WnBTrackable
-import torch.nn.functional as F
 from pose_encoder.ik_two_bone import IKChain2Bone
-from utils.utils import convert_6d_to_matrix, convert_matrix_to_6d
+from pose_encoder.batched_ik_registry import BatchedIKRegistry
+import utils.utils as utils
 
 from pose_encoder.pose_encoder import PoseEncoder
 
@@ -15,29 +14,30 @@ class SimpleEncoder(nn.Module):
         super().__init__()
         hidden = max(32, min(128, input_dim))
         
-        self.encoder = nn.Sequential(
-            nn.Linear(input_dim, hidden),
-            nn.GELU(),
-            nn.Linear(hidden, hidden//2),
-            nn.GELU()
-        )
+        # self.encoder = nn.Sequential(
+        #     nn.Linear(input_dim, hidden),
+        #     nn.GELU(),
+        #     nn.Linear(hidden, hidden//2),
+        #     nn.GELU()
+        # )
         
-        self.mu = nn.Linear(hidden//2, z_dim)
-        self.logvar = nn.Linear(hidden//2, z_dim)
+        self.mu = nn.Linear(input_dim, z_dim)
+        self.logvar = nn.Linear(input_dim, z_dim)
         
-        self.decoder = nn.Sequential(
-            nn.Linear(z_dim, hidden//2),
-            nn.GELU(),
-            nn.Linear(hidden//2, hidden),
-            nn.GELU(),
-            nn.Linear(hidden, input_dim)
-        )
+        # self.decoder = nn.Sequential(
+        #     nn.Linear(z_dim, hidden//2),
+        #     nn.GELU(),
+        #     nn.Linear(hidden//2, hidden),
+        #     nn.GELU(),
+        #     nn.Linear(hidden, input_dim)
+        # )
+        self.decoder = nn.Linear(z_dim, input_dim)
     
     def encode(self, x, return_logvar=False):
-        h = self.encoder(x)
-        mu = self.mu(h)
+        # h = self.encoder(x)
+        mu = self.mu(x)
         if return_logvar:
-            return mu, self.logvar(h)
+            return mu, self.logvar(x)
         return mu
     
     def decode(self, z):
@@ -57,7 +57,7 @@ class SimpleEncoder(nn.Module):
         return mu + eps * std
 
 class AdvancedPoseEncoder(PoseEncoder):
-    def __init__(self, pose_dim=345, component_definitions=None, device=None, checkpoint_path=None, skeleton=None):
+    def __init__(self, pose_dim=345, component_definitions=None, device=None, skeleton=None):
         super().__init__()
         if skeleton is None:
             raise ValueError("Skeleton must be provided")
@@ -91,9 +91,12 @@ class AdvancedPoseEncoder(PoseEncoder):
             if comp['type'] == 'encode':
                 input_dim = len(comp['indices'])
                 self.encoders[name] = SimpleEncoder(input_dim, comp['z_dim'])
+
+        # Replace individual IK chains with registry
+        self.ik_registry = BatchedIKRegistry(device)
+        self.chain_ids = {}
         
-        # Create IK chains for each IK component
-        self.ik_chains = {}
+        # Register each IK chain
         for name, comp in self.components.items():
             if comp['type'] == 'ik':
                 chain_parent = comp['chain_parent']
@@ -107,43 +110,34 @@ class AdvancedPoseEncoder(PoseEncoder):
                 bone2_forward_dir = torch.tensor(comp['bone2_forward_dir'], device=self.device)
                 bone2_up_dir = torch.tensor(comp['bone2_up_dir'], device=self.device)
                 
-                self.ik_chains[name] = IKChain2Bone(
+                # Register with the registry
+                chain_id = self.ik_registry.register_chain(
+                    name=name,
                     l1=bone1_len,
-                    l2=bone2_len, 
-                    chain_parent=chain_parent,
-                    twist_joint=twist_joint,
-                    device=self.device,
+                    l2=bone2_len,
                     bone1_forward_dir=bone1_forward_dir,
                     bone1_up_dir=bone1_up_dir,
                     bone2_forward_dir=bone2_forward_dir,
-                    bone2_up_dir=bone2_up_dir
+                    bone2_up_dir=bone2_up_dir,
+                    twist_joint=twist_joint,
+                    chain_parent=chain_parent
                 )
+                
+                # Store chain ID for later reference
+                self.chain_ids[name] = chain_id
         
         # Print resolved components for debugging
-        self._print_component_info()
+        # self._print_component_info()
 
         # Enhanced hyperparameters including skeleton info
+        # Store full configuration for reproducibility
         self.hyperparameter_dict_to_WnB_tracking = {
-            "total_z_dim": self.total_z_dim,
-            "preserved_dim": self.preserved_dim,
-            "ik_dim": self.ik_dim,
-            "encoded_dim": self.encoded_dim,
+            # Core parameters
+            "type": "advanced_pose_encoder",
             "pose_dim": pose_dim,
-            "ik_solver": "IKChain2Bone",
-            "hints_in_latent": True,
-            "separate_hand_encoders": True,
-            "checkpoint_path": checkpoint_path,
-            "architecture": "AdvancedPoseEncoder",
-            "skeleton_joints": len(self.skeleton.joints),
-            # Simplified IK tracking
-            "ik_chains": {name: sum(comp['bone_lengths']) 
-                         for name, comp in self.components.items() 
-                         if comp['type'] == 'ik'}
-        }
-        
-        if checkpoint_path is not None:
-            self.load_state_dict(torch.load(f"pose_encoder/models/{checkpoint_path}", map_location=device))
-            print(f"Advanced Pose Encoder loaded from {checkpoint_path}")
+            # Component configuration (critical for recreation)
+            "component_definitions": self.component_definitions
+        }    
         
         if device is not None:
             self.to(device)
@@ -242,11 +236,11 @@ class AdvancedPoseEncoder(PoseEncoder):
                     break
         
         # Print unhandled bones info
-        if self.unhandled_bones:
-            print(f"\nUnhandled bones that will use identity rotation:")
-            for bone_name, indices in self.unhandled_bones.items():
-                index_range = f"{min(indices)}-{max(indices)}" if indices else "None"
-                print(f"  {bone_name}: indices {index_range}")
+        # if self.unhandled_bones:
+        #     print(f"\nUnhandled bones that will use identity rotation:")
+        #     for bone_name, indices in self.unhandled_bones.items():
+        #         index_range = f"{min(indices)}-{max(indices)}" if indices else "None"
+        #         print(f"  {bone_name}: indices {index_range}")
         
         return resolved_components
     
@@ -300,23 +294,26 @@ class AdvancedPoseEncoder(PoseEncoder):
             indices.extend(bone_indices)
         return indices
     
-    def encode(self, x: torch.Tensor) -> torch.Tensor:
+    def encode(self, x: torch.Tensor, using_normalized_poses = True) -> torch.Tensor:
         """
         Encode a pose tensor into the latent space.
         
         Args:
-            x: [batch_size, pose_dim] Pose tensor
+            x: [batch_size, num_frames, pose_dim] Pose tensor
             
         Returns:
-            [batch_size, latent_dim] Encoded pose
+            [batch_size, num_frames, latent_dim] Encoded pose
         """
         batch_size = x.shape[0]
-        z = torch.zeros(batch_size, self.total_z_dim, device=x.device, dtype=x.dtype)
+        num_frames = x.shape[1]
+        z = torch.zeros(batch_size, num_frames, self.total_z_dim, device=x.device, dtype=x.dtype)
 
-         # Denormalize the pose for world position calculations
-        x_denorm = self.skeleton.denormalize_poses(x)
-        # x = self.skeleton.denormalize_poses(x)
-        # x_denorm = x.clone()
+        if using_normalized_poses:
+            # Denormalize the pose for world position calculations
+            x_denorm = self.skeleton.denormalize_poses(x)
+        else: 
+            x_denorm = x
+            x = self.skeleton.normalize_poses(x)  # Normalize for encoding
         
         # First, calculate world positions for the entire pose
         world_positions, world_rotations_dict = self.skeleton.calculate_world_positions(x_denorm, return_rotations=True)
@@ -326,7 +323,7 @@ class AdvancedPoseEncoder(PoseEncoder):
             if comp['type'] == 'preserve':
                 indices = comp['indices']
                 dim = len(indices)
-                z[:, z_idx:z_idx+dim] = x[:, indices] # use z-normalized pose
+                z[:, :, z_idx:z_idx+dim] = x[:, :, indices] # use z-normalized pose
                 z_idx += dim
 
         for name, comp in self.components.items():    
@@ -334,68 +331,48 @@ class AdvancedPoseEncoder(PoseEncoder):
                 indices = comp['indices']
                 encoder = self.encoders[name]
                 dim = comp['z_dim']
-                z[:, z_idx:z_idx+dim] = encoder.encode(x[:, indices]) # use z-normalized pose
+                z[:, :, z_idx:z_idx+dim] = encoder.encode(x[:, :, indices]) # use z-normalized pose
                 z_idx += dim
-        
+
+        # Process IK components
         for name, comp in self.components.items():
             if comp['type'] == 'ik':
-                # Get the chain origin joint world position
+                # Get joint positions directly from world positions
                 origin_joint = comp['chain_info']['chain_joints'][0]
                 origin_idx = self.joint_name_to_world_pos_idx[origin_joint]
-                origin_pos = world_positions[:, origin_idx*3:origin_idx*3+3]  # Get 3D position
-
-                # Get the chain elbow joint world position
+                origin_pos = world_positions[:, :, origin_idx*3:origin_idx*3+3]
+                
                 elbow_joint = comp['chain_info']['chain_joints'][1]
                 elbow_idx = self.joint_name_to_world_pos_idx[elbow_joint]
-                elbow_pos = world_positions[:, elbow_idx*3:elbow_idx*3+3]  # Get 3D position
-
-                # Get the target end effector position
+                elbow_pos = world_positions[:, :, elbow_idx*3:elbow_idx*3+3]
+                
                 end_effector_joint = comp['chain_info']['end_effector']
                 end_effector_idx = self.joint_name_to_world_pos_idx[end_effector_joint]
-                end_effector_pos = world_positions[:, end_effector_idx*3:end_effector_idx*3+3]  # Get 3D position
-
-                # print(f"Origin joint '{origin_joint}' at index {origin_idx} with position {origin_pos}")
-                # Get the rotations of the first two joints in the chain
-                joint1_rot_6d = x_denorm[:, comp['joint_indices'][:6]]  # First 6 indices for first joint
-                joint2_rot_6d = x_denorm[:, comp['joint_indices'][6:12]]  # Next 6 indices for second joint
-
-                # Convert 6D rotations to rotation matrices
-                joint1_rot = convert_6d_to_matrix(joint1_rot_6d.unsqueeze(0)).squeeze(0) # expects frames, so we need to squeeze and unsqueeze
-                joint2_rot = convert_6d_to_matrix(joint2_rot_6d.unsqueeze(0)).squeeze(0)
-
-                # Get the parent of the origin joint
-                parent_joint = self.ik_chains[name].chain_parent
-
-                # Get the world rotation for the parent of the origin joint
-                parent_rot = world_rotations_dict[parent_joint]
-
-                # Handle twist bone if defined
-                twist_rot = None
-                if 'twist_joint' in comp and comp['twist_joint'] is not None:
-                    twist_joint = comp['twist_joint']
-                    twist_indices = self.skeleton.get_joint_rotation_indices(twist_joint)
-                    twist_rot_6d = x_denorm[:, twist_indices]
-                    twist_rot = convert_6d_to_matrix(twist_rot_6d.unsqueeze(0)).squeeze(0)
-
-                # Convert rotations to IK parameters
-                end_effector_pos, elbow_pos, swivel = self.ik_chains[name].fk_to_ik(
-                    origin_pos, joint1_rot, joint2_rot, parent_rot, twist_rot
+                end_effector_pos = world_positions[:, :, end_effector_idx*3:end_effector_idx*3+3]
+                
+                # Get chain ID for this component
+                chain_id = self.chain_ids[name]
+                
+                # Calculate IK parameters using the batched registry
+                ik_results = self.ik_registry.world_positions_to_ik(
+                    chain_id,
+                    origin_pos,
+                    elbow_pos,
+                    end_effector_pos
                 )
-
-                # TODO: Maybe we should use this instead of the above? it may be more accurate (and performant)
-                # end_effector_pos, swivel = self.ik_chains[name].world_positions_to_ik(
-                #     origin_pos, elbow_pos, end_effector_pos
-                # )
-
-                # The extracted end_effector_pos is in world space. We want to z-normalize it
-                # We have to do this manually because the skeleton's denormalize_poses expects a full pose
+                
+                # Extract results
+                target_pos = ik_results['target_positions']
+                swivel = ik_results['swivel_angles']
+                
+                # Z-normalize end effector position
                 mean = self.skeleton.world_pos_mean_pose[end_effector_idx*3:end_effector_idx*3+3]
                 std = self.skeleton.world_pos_std_pose[end_effector_idx*3:end_effector_idx*3+3]
-                normalized_end_effector_pos = (end_effector_pos - mean) / std
+                normalized_target_pos = (target_pos - mean) / std
                 
-                # Store the world space target position and swivel
-                z[:, z_idx:z_idx+3] = normalized_end_effector_pos  # Store world space target
-                z[:, z_idx+3:z_idx+4] = torch.clamp(swivel, -1.0, 1.0)  # Clamp swivel to [-1, 1]
+                # Store in latent vector
+                z[:, :, z_idx:z_idx+3] = normalized_target_pos
+                z[:, :, z_idx+3:z_idx+4] = swivel
                 z_idx += 4
 
         for name, comp in self.components.items():
@@ -414,10 +391,10 @@ class AdvancedPoseEncoder(PoseEncoder):
                 # print(f"  World rotation matrix: {world_rotation}")
 
                 # Store the world space rotation in 6D format
-                world_rotation_6d = convert_matrix_to_6d(world_rotation.unsqueeze(0)).squeeze(0)
+                world_rotation_6d = utils.convert_matrix_to_6d(world_rotation)
 
                 # print (f"  World rotation 6D: {world_rotation_6d}")
-                z[:, z_idx:z_idx+6] = world_rotation_6d
+                z[:, :, z_idx:z_idx+6] = world_rotation_6d
                 # print("Storing identity rotation for world preserve after IK component at indices", comp['indices'], " in z indices", z_idx, "to", z_idx+6)
                 # z[:, z_idx:z_idx+6] = torch.tensor([1.0, 0.0, 0.0, 0.0, 1.0, 0.0], device=x.device)  # Temporary identity rotation
                 z_idx += 6
@@ -427,10 +404,16 @@ class AdvancedPoseEncoder(PoseEncoder):
     def decode(self, z):
         """Decode latent space back to pose with properly positioned IK chains."""
         batch_shape = z.shape[:-1]
+
+        profiling_stages = {}
+        start = time.time()
+
         output = torch.zeros(batch_shape + (self.pose_dim,), device=z.device, dtype=z.dtype)
         
-        start_idx = 0
+        profiling_stages['initialization'] = time.time() - start
+        start = time.time()
         
+        start_idx = 0
         # 1. Preserved components (direct copy)
         for name, comp in self.components.items():
             if comp['type'] == 'preserve':
@@ -438,7 +421,10 @@ class AdvancedPoseEncoder(PoseEncoder):
                 data = z[..., start_idx:start_idx+size]
                 output[..., comp['indices']] = data
                 start_idx += size
-        
+
+        profiling_stages['preserved_components'] = time.time() - start
+        start = time.time()
+
         # 2. Auto-encoded components
         for name, comp in self.components.items():
             if comp['type'] == 'encode':
@@ -447,14 +433,18 @@ class AdvancedPoseEncoder(PoseEncoder):
                 decoded = self.encoders[name].decode(latent).to(z.dtype)
                 output[..., comp['indices']] = decoded
                 start_idx += size
-        
-        # # preserved components and auto-encoded components work with normalized poses. But to do IK we need unnormalized poses
-        # So we denormalize everything here, and then we will normalize again at the end when we're done with IK
-        print("output.dtype", output.dtype)
-        output = self.skeleton.denormalize_poses(output)
-        print("output.dtype after denormalization", output.dtype)
 
-        # TODO: Find a better way to do this
+        profiling_stages['auto_encoded_components'] = time.time() - start
+        start = time.time()
+
+        # preserved components and auto-encoded components work with normalized poses. But to do IK we need unnormalized poses
+        # So we denormalize everything here, and then we will normalize again at the end when we're done with IK
+        output = self.skeleton.denormalize_poses(output)
+
+        profiling_stages['denormalization'] = time.time() - start
+        start = time.time()
+
+        # TODO: Find a better way to do this (future you here - dont)
         for idx in self.unhandled_indices:
             remainder = idx % 6
             if remainder == 0:  # First element of first column (0,1,0)
@@ -470,87 +460,78 @@ class AdvancedPoseEncoder(PoseEncoder):
             elif remainder == 5:  # Third element of second column
                 output[..., idx] = 0.0
 
+        # if self.unhandled_indices:  # Only process if there are unhandled indices
+            # Since unhandled indices always occur in batches of 6,
+            # we can efficiently set the pattern [0.0, 1.0, 0.0, 1.0, 0.0, 0.0]
+            # Note: positions 0, 2, 4, 5 will be 0.0 by default from initialization
+            
+            # For all indices where remainder is 1 (second element of each batch)
+            # ones_indices = [idx for idx in self.unhandled_indices if idx % 6 == 1 or idx % 6 == 3]
+            # print(ones_indices)
+            # output[..., ones_indices] = 1.0
+
+        profiling_stages['unhandled_indices'] = time.time() - start
+        start = time.time()
+
         # 3. Set identity rotations for IK joints (temporary placeholders)
         for name, comp in self.components.items():
             if comp['type'] == 'ik':
                 indices = comp['joint_indices']
-                output[..., indices[:6]] = torch.tensor([1.0, 0.0, 0.0, 0.0, 1.0, 0.0], device=z.device, dtype=z.dtype)  # Temporary identity rotation
-                output[..., indices[6:12]] = torch.tensor([1.0, 0.0, 0.0, 0.0, 1.0, 0.0], device=z.device, dtype=z.dtype)  # Temporary identity rotation
-            
+                output[..., indices] = torch.tensor([1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0], device=z.device, dtype=z.dtype)  # Temporary identity rotation
+
+        profiling_stages['identity_rotations'] = time.time() - start
+        start = time.time()
+
         # 4. Calculate world positions with pre-ik pose.
         # We need to do this so we can get the origin positions and world rotations for IK chains
-        world_positions, world_rotations_dict = self.skeleton.calculate_world_positions(output, return_rotations=True)
-        
-        # 5. Process IK components with proper origins
-        start_idx = self.preserved_dim + self.encoded_dim  # Reset index for IK components
-        
-        world_parent_rotations_after_ik_dict = {}
 
+        # get every ik chain's origin joint name
+        joints_to_calculate_world_positions_for = []
         for name, comp in self.components.items():
             if comp['type'] == 'ik':
-                # Extract position and swivel
-                normalized_target_pos = z[..., start_idx:start_idx+3]
-                swivel = z[..., start_idx+3:start_idx+4]
-                start_idx += 4
-                
-                # The stored target pos is z-normalized, so we need to denormalize it
-                # Get end effector index for denormalization
-                end_effector_joint = comp['chain_info']['end_effector']
-                end_effector_idx = self.joint_name_to_world_pos_idx[end_effector_joint]
-
-                # Get the mean and std for the end effector position
-                mean = self.skeleton.world_pos_mean_pose[end_effector_idx*3:end_effector_idx*3+3]
-                std = self.skeleton.world_pos_std_pose[end_effector_idx*3:end_effector_idx*3+3]
-
-                # Denormalize the target position
-                target_pos = normalized_target_pos * std + mean
-
-                # Get chain origin joint name and find its world position
                 origin_joint = comp['chain_info']['chain_joints'][0]
-                origin_idx = self.joint_name_to_world_pos_idx[origin_joint]
-                origin_pos = world_positions[:, origin_idx*3:origin_idx*3+3]  # Get 3D position
+                joints_to_calculate_world_positions_for.append(origin_joint)
+                # print("ik chain origin joint:", origin_joint)
 
-                # Get the chain origin world rotation
-                origin_rot = world_rotations_dict[origin_joint]
-                
-                # Get the IK chain for this component
-                ik_chain = self.ik_chains[name]
-                
-                # Convert IK parameters to joint rotations with local target
-                local_rot1, local_rot2, elbow_pos, target_pos, world_rot1, world_rot2 = ik_chain.ik_to_fk(
-                    origin_pos, 
-                    target_pos, 
-                    swivel * torch.pi * 0.25, # scale from [-1, 1] to radians
-                    origin_rot # Supply the origin rotation to return local rotations
-                )
+        # print("Joints to calculate for:", joints_to_calculate_world_positions_for)
 
-                # Store the world rotations for later use
-                world_parent_rotations_after_ik_dict[comp['chain_info']['end_effector']] = world_rot2
+        world_positions, world_rotations_dict = self.skeleton.calculate_world_positions_new(output, joints_to_calculate=joints_to_calculate_world_positions_for, return_rotations=True)
 
-                # Convert joint positions to 6D rotations
-                rot1_6d = convert_matrix_to_6d(local_rot1.unsqueeze(0)).squeeze(0)  # expects frames, so we need to unsqueeze and squeeze
-                rot2_6d = convert_matrix_to_6d(local_rot2.unsqueeze(0)).squeeze(0)
-                
-                # Place results in output tensor
-                indices = comp['joint_indices']
-                if len(indices) >= 12:
-                    output[..., indices[:6]] = rot1_6d.to(z.dtype)
-                    output[..., indices[6:12]] = rot2_6d.to(z.dtype)
+        # print("world rotations dict:", world_rotations_dict)
+        # print("world positions shape:", world_positions.shape)
+
+        profiling_stages['world_positions'] = time.time() - start
+        start = time.time()
+
+        # 5. Process IK components with proper origins
+        start_idx = self.preserved_dim + self.encoded_dim  # Reset index for IK components
+
+        # In the decode method, replace IK processing:
+        # Process all IK components in a single batch operation
+        start_idx = self.preserved_dim + self.encoded_dim
+        start_idx, world_parent_rotations_after_ik_dict = self.ik_registry.process_all_chains_decode(
+            z=z,
+            output=output,
+            world_positions=world_positions,
+            world_rotations_dict=world_rotations_dict,
+            components=self.components,
+            start_idx=start_idx,
+            joint_name_to_world_pos_idx=self.joint_name_to_world_pos_idx,
+            skeleton=self.skeleton,
+            chain_ids=self.chain_ids
+        )
+
+        profiling_stages['ik_processing'] = time.time() - start
+        start = time.time()
 
         for name, comp in self.components.items():
             if comp['type'] == 'world_preserve_after_ik':
                 world_space_rot_6d = z[..., start_idx:start_idx+6]
                 start_idx += 6
                 bone_name = comp['bone_name']
-
-                # print("DECODING WORLD PRESERVE AFTER IK")
-                # print(f"  Bone name: {bone_name}")
-                # print(f"  World space rotation 6D: {world_space_rot_6d}")
                 
                 # convert 6D rotation to matrix
-                world_space_rot = convert_6d_to_matrix(world_space_rot_6d.unsqueeze(0)).squeeze(0)
-
-                # print(f"  World space rotation matrix: {world_space_rot}")
+                world_space_rot = utils.convert_6d_to_matrix(world_space_rot_6d)
 
                 # Get the world rotation of the parent of this bone after IK - This is so we can convert world space rotations to local rotations
                 parent_rot = world_parent_rotations_after_ik_dict[bone_name]
@@ -562,7 +543,7 @@ class AdvancedPoseEncoder(PoseEncoder):
                 local_rot = torch.matmul(parent_rot_inv, world_space_rot)
 
                 # Convert local rotation to 6D
-                local_rot_6d = convert_matrix_to_6d(local_rot.unsqueeze(0)).squeeze(0)
+                local_rot_6d = utils.convert_matrix_to_6d(local_rot)
 
                 # Get the indices for this bone
                 indices = comp['indices']
@@ -570,12 +551,41 @@ class AdvancedPoseEncoder(PoseEncoder):
                 # print(f"  Storing local rotation 6D at indices {indices[:6]}")
                 output[..., indices[:6]] = local_rot_6d.to(z.dtype)
 
-        
+        profiling_stages['world_preserve_after_ik'] = time.time() - start
+
         # Now we need to normalize the output pose again
         output = self.skeleton.normalize_poses(output)
 
+        profiling_stages['final_normalization'] = time.time() - start
+
+        # Print profiling information
+        print("\n=== Pose Encoder Profiling Information ===")
+        for stage, duration in profiling_stages.items():
+            print(f"{stage:30}: {duration * 1000:.2f} ms")
+
         return output
     
+    def construct_component_weighting_vector(self, category_weighting: Dict[str, float]) -> torch.Tensor:
+        """
+        Construct a weighting vector for the components based on the provided category weights.
+        
+        Args:
+            category_weighting: Dictionary mapping component categories to their weights.
+        
+        Returns:
+            A tensor of shape (total_z_dim,) containing the weights for each component.
+        """
+        weights = torch.ones(self.total_z_dim, device=self.device)
+        start_idx = 0
+        
+        for name, comp in self.components.items():
+            if comp['type'] in category_weighting:
+                weight = category_weighting[comp['type']]
+                size = comp['z_dim']
+                weights[start_idx:start_idx+size] = weight
+                start_idx += size
+        return weights
+
     def get_WnB_config_specs(self):
         return self.hyperparameter_dict_to_WnB_tracking
     
@@ -614,3 +624,32 @@ class AdvancedPoseEncoder(PoseEncoder):
         print(f"  Preserved: {self.preserved_dim}")
         print(f"  IK: {self.ik_dim}")
         print(f"  Encoded: {self.encoded_dim}")
+
+    @staticmethod
+    def load_from_checkpoint(checkpoint_name, device = utils.get_device()):
+        checkpoint_path = f"pose_encoder/models/{checkpoint_name}.pth"
+            
+        # Load the saved data
+        checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+        
+        # New format with complete configuration
+        state_dict = checkpoint['state_dict']
+        pose_dim = checkpoint['hyperparameters']['pose_dim']
+        component_definitions = checkpoint['hyperparameters']['component_definitions']
+        skeleton = checkpoint['skeleton']
+        
+        # Create new model instance
+        pose_encoder_model = AdvancedPoseEncoder(
+            pose_dim                = pose_dim,
+            component_definitions   = component_definitions,
+            device                  = device,
+            skeleton                = skeleton
+        )
+
+        # Add the checkpoint name to the hyperparameter tracking
+        pose_encoder_model.hyperparameter_dict_to_WnB_tracking['checkpoint_name'] = checkpoint_name
+        
+        # Load the state dict
+        pose_encoder_model.load_state_dict(state_dict)
+            
+        return pose_encoder_model

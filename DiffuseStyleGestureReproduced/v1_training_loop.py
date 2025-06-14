@@ -8,11 +8,13 @@ from tqdm import tqdm
 import time
 import v1_evaluation
 from IPython.display import clear_output
-from v1_model import ContinuousMotionModel, load_model
+from pose_encoder.advanced_pose_encoder import AdvancedPoseEncoder
+from v1_model import ContinuousMotionModel
 from torch.utils.data import DataLoader
 from utils.utils import get_latest_model_path
 import wandb
 import yaml
+import utils.animation.visualisation.new.animation_visualisation as animation_visualisation
 
 def train(
         experiment_collection_name: str, # Name of the gruope of experiments, this run is a part of
@@ -30,12 +32,13 @@ def train(
         variance_loss_weight = 0.1,
         velocity_loss_weight = 0.1,
         acceleration_loss_weight = 0.1,
+        jerk_loss_weight = 0.0,
         latent_space_loss_weight = 2.0,
-        category_weighting: dict[str, float] = {},
+        category_weighting: dict[str, float] = None,
         frame_weighting_segments_info: list[(float, float, float)] = [], # This is a list of tuples, where each tuple contains the start and end of a segment, and the end frame of the segment. This is used to create a frame weighting vector that weights the loss for each frame. Since we are essentially doing infill diffusion, we want to bias the the loss for the frames that are not masked out.
         visualize_step: int = 200, # How often to print profiling stats
         continue_from_checkpoint: str = None, # Path to a checkpoint to continue training from. If provided, the model will be loaded from this checkpoint and training will continue from there.
-        visualize_training_progress = True, # Whether to display the training progress in a Jupyter notebook
+        should_visualize_training_progress = True, # Whether to display the training progress in a Jupyter notebook
     ):
 
     current_model_name = f"{experiment_collection_name}_{time.strftime('%Y-%m-%d_%H-%M-%S')}"
@@ -48,6 +51,7 @@ def train(
                       'variance_loss':              ([],[]), 
                       'velocity_loss':              ([],[]), 
                       'acceleration_loss':          ([],[]),
+                      'jerk_loss':                  ([],[]),
                       'epoch_loss':                 ([],[])}
     
     val_loss_rec = {'loss':                         ([],[]),
@@ -55,7 +59,8 @@ def train(
                     'encoded_latent_space_loss':    ([],[]), 
                     'variance_loss':                ([],[]), 
                     'velocity_loss':                ([],[]), 
-                    'acceleration_loss':            ([],[])}
+                    'acceleration_loss':            ([],[]),
+                    'jerk_loss':                    ([],[]),}
                     
     frechet_distance_rec = {'encoded':              [], 
                             'raw':                  []}
@@ -86,8 +91,18 @@ def train(
     if wandb_config is not None:
         wandb_config.update(hyper_parameters, allow_val_change=True)  # <- Important: allows adding/updating keys
 
-    # bone_category_weigthing data used to weight bones differently in the loss function based on assigned category weightings.
-    bone_category_weighting = training_loader.dataset.skeleton.construct_bone_weighting_vector(category_weighting)
+    # category_weighting data used to weight bones differently in the loss function based on assigned category weightings.
+    if category_weighting is not None:
+        if training_loader.dataset.loading_encoded_data:
+            # If we are training using encoded data, we cannot weight individual bones, since we dont have access to the full pose, only the encoded latent space.
+            if isinstance(model.pose_encoder, AdvancedPoseEncoder):
+                # If we are training using an advanced pose encoder, we construct the bone weighting vector we weight according to component specifications from the advanced pose encoder.
+                category_weighting_vector = model.pose_encoder.construct_component_weighting_vector(category_weighting)
+        else:
+            # If we are not loading encoded data we can weight individual bones based on the category weighting.
+            category_weighting_vector = training_loader.dataset.skeleton.construct_bone_weighting_vector(category_weighting)
+    else:
+        category_weighting_vector = None
     
     # frame weighting vector used to weight the loss for each frame based on the segments info provided.
     frame_weighting = construct_frame_weighting_vector(frame_weighting_segments_info) if frame_weighting_segments_info else None
@@ -137,6 +152,9 @@ def train(
 
     epoch_length = len(training_loader)
 
+
+    display_url = animation_visualisation.init_visualization(display=False)  # Initialize the animation visualization, but don't display it yet
+
     # Main training loop, where we iterate over the number of epochs and the training data.
     for epoch in range(start_epoch, num_epochs):
         # I set the model to training mode
@@ -164,7 +182,7 @@ def train(
                 gesture_sequence            = gesture_sequence,
                 audio_features              = audio_features,
                 main_agent_id_one_hot       = main_agent_id_one_hot,
-                replace_frames              = 0 if model.predict_full_duration else model.num_of_pre_timestep_frames
+                gesture_sequence_is_encoded = training_loader.dataset.loading_encoded_data
             )
 
             # Perform loss calculations.
@@ -178,7 +196,8 @@ def train(
                 variance_loss_weight        = variance_loss_weight,
                 velocity_loss_weight        = velocity_loss_weight,
                 acceleration_loss_weight    = acceleration_loss_weight,
-                bone_weighting_vector       = bone_category_weighting,
+                jerk_loss_weight            = jerk_loss_weight,
+                bone_weighting_vector       = category_weighting_vector,
                 frame_weighting_vector      = frame_weighting,
                 loss_recorder               = train_loss_rec
             )
@@ -200,20 +219,22 @@ def train(
                 run.log({"total_loss": total_loss.item()}, step=step)
 
             # Visualization
-            if i % visualize_step == 0 and not is_running_on_slurm() and visualize_training_progress:
+            if i % visualize_step == 0 and not is_running_on_slurm() and should_visualize_training_progress:
                 visualize_training_progress(
                     full_gesture_sequence               = gesture_sequence,
                     full_denoised_gesture_sequence      = output,
                     encoded_gesture_sequence            = encoded_gesture_sequence,
                     encoded_denoised_gesture_sequence   = encoded_output,
                     noisy_gesture_sequence              = noisy_gesture_sequence,
-                    using_pose_encoder                  = model.pose_encoder is not None,
+                    using_pose_encoder                  = model.pose_encoder is not None and not training_loader.dataset.loading_encoded_data,
                     train_loss_rec                      = train_loss_rec,
                     val_loss_rec                        = val_loss_rec,
                     frechet_distance_rec                = frechet_distance_rec,
                     visualize_step                      = visualize_step,
                     frame_weighting                     = frame_weighting
-                )        
+                )
+                print("Visualize results at", display_url)  # Display the animation visualization URL
+                
         ########################################################################
         # End of epoch
         ########################################################################
@@ -244,13 +265,12 @@ def train(
             val_loader        = val_loader,
             device            = device,
             evaluation_length = 30,
-            num_samples       = 64,
+            num_samples       = 256,
             calculate_raw_frechet_distance = False
         )
 
         # Log the Frechet distance so we can see how it changes over time.
         frechet_distance_rec['encoded'].append(frechet_distance)
-        # frechet_distance_rec['raw'].append(frechet_distance_raw_features)
 
         # We run the model on the validation set to calculate the validation loss.
         with torch.no_grad():
@@ -263,7 +283,8 @@ def train(
                 output, encoded_gesture_sequence, encoded_output, noisy_gesture_sequence = model.generate(
                     gesture_sequence            = gesture_sequence,
                     audio_features              = audio_features,
-                    main_agent_id_one_hot       = main_agent_id_one_hot
+                    main_agent_id_one_hot       = main_agent_id_one_hot,
+                    gesture_sequence_is_encoded = val_loader.dataset.loading_encoded_data
                 )
 
                 # Perform loss calculations.
@@ -277,7 +298,8 @@ def train(
                     variance_loss_weight        = variance_loss_weight,
                     velocity_loss_weight        = velocity_loss_weight,
                     acceleration_loss_weight    = acceleration_loss_weight,
-                    bone_weighting_vector       = bone_category_weighting,
+                    jerk_loss_weight            = jerk_loss_weight,
+                    bone_weighting_vector       = category_weighting_vector,
                     frame_weighting_vector      = frame_weighting,
                     loss_recorder               = val_loss_rec
                 )
@@ -323,6 +345,7 @@ def calculate_loss(pred, gt,
          variance_loss_weight, 
          velocity_loss_weight, 
          acceleration_loss_weight,
+         jerk_loss_weight,
          bone_weighting_vector, # This is a vector that weights the loss for each bone category.
          frame_weighting_vector, # This is a vector that weights the loss for each frame. Since we are essentially doing infill diffusion, we want to bias the the loss for the frames that are not masked out.
          loss_recorder = None # This is a dictionary that keeps track of the losses during training and validation so we can plot them later.
@@ -331,18 +354,21 @@ def calculate_loss(pred, gt,
     with autocast(device_type=device.type, dtype=torch.bfloat16):
 
         # Use the casted target for all loss calculations
-        recon_l = nn.HuberLoss(reduction="none")(pred, gt)# * reconstruction_loss_weight
+        recon_l = nn.HuberLoss(reduction="none")(pred, gt) * reconstruction_loss_weight
 
         encoded_latent_space_l = nn.HuberLoss(reduction="none")(encoded_gt, encoded_pred) * latent_space_loss_weight
         variance_l = variance_loss(pred, gt) * variance_loss_weight 
         velocity_l = velocity_loss(pred, gt) * velocity_loss_weight 
         acceleration_l = acceleration_loss(pred, gt) * acceleration_loss_weight
+        jerk_l = jerk_loss(pred, gt) * jerk_loss_weight
 
         # Apply the bone category weighting (Can't be applied to encoded latent space loss, since it is not a tensor of the same shape as the other losses)
-        recon_l = bone_weighting_vector * recon_l
-        variance_l = bone_weighting_vector * variance_l
-        velocity_l = bone_weighting_vector * velocity_l
-        acceleration_l = bone_weighting_vector * acceleration_l
+        if bone_weighting_vector is not None:
+            recon_l = bone_weighting_vector * recon_l
+            variance_l = bone_weighting_vector * variance_l
+            velocity_l = bone_weighting_vector * velocity_l
+            acceleration_l = bone_weighting_vector * acceleration_l
+            jerk_l = bone_weighting_vector * jerk_l
 
         # Apply the frame weighting vector (Can't be applied to variance loss, since variance is calculated over time, and not per frame)
         if frame_weighting_vector is not None:
@@ -353,6 +379,7 @@ def calculate_loss(pred, gt,
             encoded_latent_space_l = frame_weighting_vector * encoded_latent_space_l
             velocity_l = frame_weighting_vector[:,:-1,:] * velocity_l # Velocity used finite difference to determine the derivative, so we need to remove the last frame for lengths to match
             acceleration_l = frame_weighting_vector[:,:-2,:] * acceleration_l # Acceleration used finite difference to determine the second derivative, so we need to remove the last two frames for lengths to match
+            jerk_l = frame_weighting_vector[:,:-3,:] * jerk_l # Jerk used finite difference to determine the third derivative, so we need to remove the last three frames for lengths to match
 
         # Now we find the mean over the batch and time dimensions
         recon_l = recon_l.mean()
@@ -360,9 +387,10 @@ def calculate_loss(pred, gt,
         variance_l = variance_l.mean()
         velocity_l = velocity_l.mean()
         acceleration_l = acceleration_l.mean()
+        jerk_l = jerk_l.mean()
 
         # Combine all losses
-        total_loss = recon_l + encoded_latent_space_l + variance_l + velocity_l + acceleration_l
+        total_loss = recon_l + encoded_latent_space_l + variance_l + velocity_l + acceleration_l + jerk_l
 
         # If a loss_recorder is provided, we will record the losses in it.
         if loss_recorder is not None:
@@ -372,6 +400,7 @@ def calculate_loss(pred, gt,
             loss_recorder['variance_loss'][0].append(variance_l.item())
             loss_recorder['velocity_loss'][0].append(velocity_l.item())
             loss_recorder['acceleration_loss'][0].append(acceleration_l.item())
+            loss_recorder['jerk_loss'][0].append(jerk_l.item())
 
         return total_loss
 
@@ -393,9 +422,22 @@ def velocity_loss(pred, gt):
 # This is to prevent jittery in the motion, and to help the model learn smoother motions, 
 # since jittery motions will cause acceleration to be high. (constantly changing direction)
 def acceleration_loss(pred, gt):
-    acc_pred = pred[:, 2:] - 2 * pred[:, 1:-1] + pred[:, :-2]  # Second-order difference
-    acc_gt = gt[:, 2:] - 2 * gt[:, 1:-1] + gt[:, :-2]
+    vel_pred = pred[:, 1:] - pred[:, :-1]  # First-order difference
+    vel_gt = gt[:, 1:] - gt[:, :-1]
+    acc_pred = vel_pred[:, 1:] - vel_pred[:, :-1]  # Second-order difference
+    acc_gt = vel_gt[:, 1:] - vel_gt[:, :-1]
     return (acc_pred - acc_gt) ** 2
+
+# Jerk loss function to penalize the difference in jerk between the predicted and true gesture.
+# Jerk is the third derivative of the motion, and is used to prevent sudden changes in acceleration.
+def jerk_loss(pred, gt):
+    vel_pred = pred[:, 1:] - pred[:, :-1]  # First-order difference
+    vel_gt = gt[:, 1:] - gt[:, :-1]
+    acc_pred = vel_pred[:, 1:] - vel_pred[:, :-1]  # Second-order difference
+    acc_gt = vel_gt[:, 1:] - vel_gt[:, :-1]
+    jerk_pred = acc_pred[:, 1:] - acc_pred[:, :-1]  # Third-order difference
+    jerk_gt = acc_gt[:, 1:] - acc_gt[:, :-1]
+    return (jerk_pred - jerk_gt) ** 2
 
 # Encoded latent space loss function to penalize the difference between the encoded latent space and the predicted encoded latent space.
 # This helps the model learn a good representation of the data in latent space. Possibly this is all that is needed, since the model is trained to predict the encoded latent space.
@@ -442,13 +484,16 @@ def visualize_training_progress(
 
     # Create a single figure with GridSpec to manage all plots
     # Height ratios for each row
+
+    full_gesture_sequence_height = full_gesture_sequence.shape[1]
+    
     if using_pose_encoder:
-        height_ratios = [4, 2, 8]  # Loss plots, Latent space viz, Gesture viz
+        height_ratios = [4, 2, full_gesture_sequence_height * 0.02]  # Loss plots, Latent space viz, Gesture viz
     else:
-        height_ratios = [4, 0, 8]  # Loss plots, Gesture viz
+        height_ratios = [4, 0, full_gesture_sequence_height * 0.02]  # Loss plots, Gesture viz
     
     # Create figure with appropriate height
-    fig = plt.figure(figsize=(30, 9 * 3))
+    fig = plt.figure(figsize=(30, 9 * 2 + full_gesture_sequence_height * 0.01))
     gs = fig.add_gridspec(3, 4, height_ratios=height_ratios)
     
     # Add overall title
@@ -462,6 +507,7 @@ def visualize_training_progress(
     ax_train.plot(train_loss_rec['variance_loss'][1], label='Variance Loss', color='orange')
     ax_train.plot(train_loss_rec['velocity_loss'][1], label='Velocity Loss', color='purple')
     ax_train.plot(train_loss_rec['acceleration_loss'][1], label='Acceleration Loss', color='brown')
+    ax_train.plot(train_loss_rec['jerk_loss'][1], label='Jerk Loss', color='pink')
     ax_train.set_title('Losses over Training Steps', fontsize=20)
     ax_train.set_xlabel('Step')
     ax_train.set_ylabel('Loss')
@@ -476,6 +522,7 @@ def visualize_training_progress(
     ax_val.plot(val_loss_rec['variance_loss'][1], label='Variance Loss', color='orange')
     ax_val.plot(val_loss_rec['velocity_loss'][1], label='Velocity Loss', color='purple')
     ax_val.plot(val_loss_rec['acceleration_loss'][1], label='Acceleration Loss', color='brown')
+    ax_val.plot(val_loss_rec['jerk_loss'][1], label='Jerk Loss', color='pink')
     ax_val.set_title('Validation Losses over Training Steps', fontsize=20)
     ax_val.set_xlabel('Step')
     ax_val.set_ylabel('Loss')
@@ -641,7 +688,7 @@ def resume_training_from_checkpoint(
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     model_state = checkpoint['model_state']
 
-    model = load_model(model_state, device)
+    model = ContinuousMotionModel.load_model(model_state, device)
     
     # Load optimizer state
     optimizer.load_state_dict(checkpoint['optimizer_state_dict'])

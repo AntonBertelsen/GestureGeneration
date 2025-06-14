@@ -1,15 +1,17 @@
+import time
 import torch
 from v1_model import ContinuousMotionModel
 from torch.utils.data import DataLoader
 from utils.animation.skeleton import Skeleton
 from utils.evaluation.FGD.embedding_space_evaluator import EmbeddingSpaceEvaluator
+import utils.animation.visualisation.new.animation_visualisation as animation_visualisation
 
 def evaluate_frechet_gesture_distance(
         model: ContinuousMotionModel, 
         val_loader: DataLoader, 
         device: torch.device,
         evaluation_length = 30, 
-        num_samples = 100,
+        num_samples = 8192,
         calculate_raw_frechet_distance = True) -> None:
     with torch.no_grad():
 
@@ -54,7 +56,7 @@ def evaluate_frechet_gesture_distance(
         ]
 
         feature_dim = full_gesture_sequence.shape[2]
-        encoded_feature_dim = pose_encoder.z_dim if pose_encoder is not None else feature_dim
+        encoded_feature_dim = pose_encoder.z_dim if pose_encoder is not None and not val_loader.dataset.loading_encoded_data else feature_dim
 
         # We prepare a result tensor to store the generated data
         # This is of shape (bs, num_timestep_frames + n_frames, feature_dim)
@@ -66,7 +68,7 @@ def evaluate_frechet_gesture_distance(
         # Cast to float precision (TODO: Why are we doing this?)
         full_gesture_sequence = full_gesture_sequence.float()
 
-        if pose_encoder is not None:
+        if not val_loader.dataset.loading_encoded_data and pose_encoder is not None:
             full_encoded_gesture_sequence = pose_encoder.encode(full_gesture_sequence)
         else:
             full_encoded_gesture_sequence = full_gesture_sequence
@@ -81,35 +83,13 @@ def evaluate_frechet_gesture_distance(
             # at every iteration
             current_audio_features = full_audio_features[:, i:i + model.num_of_pre_timestep_frames + model.num_of_timestep_frames + model.num_of_post_timestep_frames, :]
 
-            for stacking_level in range(model.max_timestep_stacking_level):                
-                # We apply noise to the gesture sequence at every iteration because we predict the clean image at every step.
-                starting_point_encoded_gesture_sequence = current_encoded_gesture_sequence
-                
-                noisy_gesture_sequence = model.diffusion.forward(current_encoded_gesture_sequence, stacking_level)
-
-                current_encoded_gesture_sequence = model(
-                    time_step_stacking_level    = stacking_level,
-                    one_hot_style               = main_agent_id_one_hot,
-                    audio_features              = current_audio_features, 
-                    noisy_gesture_sequence      = noisy_gesture_sequence
-                )
-
-            if model.predict_full_duration:
-                # The model predicts the whole sequence, but only the last frames were noised to begin with. We are essentially doing infill-diffusion.
-                # We need to copy the original data to the result tensor, so that we can use it as a starting point for the next iteration.
-                # We copy the original real data on top of the area that was not denoised, in order to avoid the model degenerating over time.
-                current_encoded_gesture_sequence[:, :model.num_of_pre_timestep_frames, :] = starting_point_encoded_gesture_sequence[:, :model.num_of_pre_timestep_frames, :]
-
-            copy_index = model.num_of_timestep_frames if model.predict_full_duration else 0 # TODO: Make sure this is the correct frame being copied. I am slighty worried we are copying one frame to far forward (i.e. still not fully denoised)
-
+            current_encoded_gesture_sequence, _ = model.inference(
+                current_encoded_gesture_sequence, 
+                current_audio_features, 
+                main_agent_id_one_hot
+            )
             # copy the newest predicted frame to the result tensor
-            result_tensor[:, i, :] = current_encoded_gesture_sequence[:, copy_index, :]
-
-            # TODO: Does this actually belong at the top of the loop? I am not sure
-            # Shift the gesture_sequence by one frame
-            current_encoded_gesture_sequence = torch.roll(noisy_gesture_sequence, shifts=-1, dims=1)
-            # Clear the last frame (this will be filled with noise in the next iteration by the diffusion model)
-            current_encoded_gesture_sequence[:, -1] = torch.zeros_like(current_encoded_gesture_sequence[:, -1])
+            result_tensor[:, i, :] = current_encoded_gesture_sequence[:, model.num_of_pre_timestep_frames, :]
         
         # The first num_presteps frames of the prediction had access to the original gesture sequence, so in a sense they 'cheated'. For this reason, we discard them.
         # The remaining n_frames result tensor are the final generated gestures.
@@ -126,6 +106,13 @@ def evaluate_frechet_gesture_distance(
         # First we need to denormalized the output tensor to recover the original feature space (the rotation matrices)
         denormalized_output = skeleton.denormalize_poses(output)
 
+        # Send every frame in the original gesture sequence to the animation visualisation
+        
+        animation_visualisation.send_debug_tensor(output[0].cpu(), "generated gesture sequence")
+        for frame in denormalized_output[0]:
+            animation_visualisation.send_pose(frame.cpu(), skeleton)
+            time.sleep( 1 / 30)
+
         # Now we want to calcualte world postions from the denormalized output tensor
         world_positions = skeleton.calculate_world_positions(denormalized_output)
 
@@ -141,6 +128,10 @@ def evaluate_frechet_gesture_distance(
         # This is [num_presteps + num_steps: num_presteps + num_steps + n_frames]
         original_gesture_sequence = full_gesture_sequence[:, model.num_of_pre_timestep_frames + model.num_of_timestep_frames:model.num_of_pre_timestep_frames + model.num_of_timestep_frames + n_frames, :]
         
+        if val_loader.dataset.loading_encoded_data:
+            # If we are loading encoded data, we need to decode the original gesture sequence as well
+            original_gesture_sequence = pose_encoder.decode(original_gesture_sequence)
+
         # We need to denormalize the original gesture sequence to recover the original feature space (the rotation matrices)
         denormalized_original_gesture_sequence = skeleton.denormalize_poses(original_gesture_sequence)
         
@@ -148,6 +139,13 @@ def evaluate_frechet_gesture_distance(
         world_positions = skeleton.calculate_world_positions(denormalized_original_gesture_sequence)
         # Now we want to z-normalize the world positions to get the final output tensor
         
+
+        # Send every frame in the original gesture sequence to the animation visualisation
+        animation_visualisation.send_debug_tensor(original_gesture_sequence[0].cpu(), "generated gesture sequence")
+        for frame in denormalized_original_gesture_sequence[0]:
+            animation_visualisation.send_pose(frame.cpu(), skeleton)
+            time.sleep( 1 / 30)
+
         normalized_original_world_positions = skeleton.normalize_world_positions(world_positions)
 
         embeddingSpaceEvaluator.push_real_samples(normalized_original_world_positions)

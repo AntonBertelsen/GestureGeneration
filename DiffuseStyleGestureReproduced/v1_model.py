@@ -5,9 +5,10 @@ from local_attention import transformer
 from local_attention.rotary import SinusoidalEmbeddings, apply_rotary_pos_emb
 from typing import Union
 from utils.WnB_trackable import WnBTrackable
-from utils.durationAdjuster import DurationAdjuster
 from v1_sliding_diffusion import Diffusion
 from pose_encoder.pose_encoder import PoseEncoder
+from pose_encoder.vae_pose_encoder import VAEPoseEncoder
+from pose_encoder.advanced_pose_encoder import AdvancedPoseEncoder
 from utils.debugger import Debugger, Show
 import utils.utils as utils
 
@@ -71,12 +72,6 @@ class ContinuousMotionModel(nn.Module, WnBTrackable):
                 param.requires_grad = False
             pose_encoder.eval()
 
-        if not self.predict_full_duration:
-            self.duration_adjuster = DurationAdjuster(
-                input_length=self.n_gesture_length,
-                target_length=self.num_of_timestep_frames
-            )
-
         assert (self.num_of_pre_timestep_frames +
             self.num_of_timestep_frames +
             self.num_of_post_timestep_frames == self.n_gesture_length), (
@@ -92,8 +87,8 @@ class ContinuousMotionModel(nn.Module, WnBTrackable):
         # We precompute the pre- and post timestep vectores - that is timestep 0 and max_number_of_time_steps * self.max_timestep_stacking_level
         
         # We create tensors for the timestep linear layers
-        self.timestep_0 = torch.tensor([0.0]).to(self.device) # TODO: should we send to device here or in the forward pass?
-        self.timestep_max = torch.tensor([float(self.num_of_timestep_frames * self.max_timestep_stacking_level)]).to(self.device)  # TODO: should we send to device here or in the forward pass?
+        self.timestep_0 = torch.tensor([0.0], device=self.device)
+        self.timestep_max = torch.tensor([float(self.num_of_timestep_frames * self.max_timestep_stacking_level)], device=self.device)
         
         # We rescale them to be between 0 and 1 to make it easier for the MLP positional embedding to learn
         # self.timestep_0 /= (self.num_of_timestep_frames * self.max_timestep_stacking_level)
@@ -104,7 +99,7 @@ class ContinuousMotionModel(nn.Module, WnBTrackable):
         for time_step_stacking_level in range(self.max_timestep_stacking_level):
             timesteps = [(t + 1) * self.max_timestep_stacking_level - (time_step_stacking_level % self.max_timestep_stacking_level) for t in range(self.num_of_timestep_frames)]
             # timesteps /= [t / (self.num_of_timestep_frames * self.max_timestep_stacking_level) for t in timesteps]
-            timesteps = torch.tensor(timesteps, dtype=torch.bfloat16).unsqueeze(-1).to(self.device) # TODO: should we send to device here or in the forward pass?
+            timesteps = torch.tensor(timesteps, dtype=torch.bfloat16, device=self.device).unsqueeze(-1)
             # print("!!!! timesteps", timesteps, "shape", timesteps.shape)
             self.timesteps_for_frames_at_stacking_level[time_step_stacking_level] = timesteps # 1 is added, since stakkings start at 1, not 0. The Stakking level multiplies the number of defusion steps each timestep undergoes, so if the stakking level is 0 - there is no diffusion steps. 
 
@@ -431,23 +426,16 @@ class ContinuousMotionModel(nn.Module, WnBTrackable):
         output_tensor = self.final_linear(transformer_encoder_output)
         self.debugger.capture(("output_tensor", output_tensor), [Show.MAX_MIN, Show.IMAGE], keys="output_tensor")
 
-
-        # if not self.predict_full_duration:
-        #     # 4.1 - If we are not predicting the full duration, we need to adjust the duration of the output tensor
-        #     #       We use the DurationAdjuster to adjust the duration of the output tensor to match the number of frames in the sequence
-        #     output_tensor = self.duration_adjuster(output_tensor, self.num_of_timestep_frames)
-        #     self.debugger.capture(("output_tensor after duration adjustment", output_tensor), [Show.MAX_MIN, Show.IMAGE], keys="output_tensor_after_duration_adjustment")
-
         # 4 - Return the output of the liniear layer
         return output_tensor
 
-    def generate(self, gesture_sequence, audio_features, main_agent_id_one_hot, replace_frames: int = 0):
+    def generate(self, gesture_sequence, audio_features, main_agent_id_one_hot, gesture_sequence_is_encoded: bool = False):
         with autocast(device_type=self.device.type, dtype=torch.bfloat16):
 
             # If the autoencoder model is provided, we use it to encode the gesture sequence to a lower
             # dimensional latent space which is also more gaussian.
             # This is to help the diffusion model learn a better representation of the data.
-            encoded_gesture_sequence = self.pose_encoder.encode(gesture_sequence) if self.pose_encoder is not None else gesture_sequence
+            encoded_gesture_sequence = self.pose_encoder.encode(gesture_sequence) if self.pose_encoder is not None and not gesture_sequence_is_encoded else gesture_sequence
 
             # We diffuse the encoded gesture sequence to create a noisy starting point for the diffusion model.
             # TODO: Currently the same time step stacking level is used for all the sequences in the batch. This might be bad? Not sure
@@ -461,16 +449,41 @@ class ContinuousMotionModel(nn.Module, WnBTrackable):
                 audio_features              = audio_features, 
                 noisy_gesture_sequence      = noisy_gesture_sequence
             )
-
-            # if replace frames are provided, we replace the first frames of the output with the original gesture sequence
-            if replace_frames > 0:
+            
+            if not self.predict_full_duration:
                 # Ensure the replace_frames does not exceed the length of the gesture sequence
-                encoded_output[:, :replace_frames] = encoded_gesture_sequence[:, :replace_frames]
+                encoded_output[:, :self.num_of_pre_timestep_frames] = encoded_gesture_sequence[:, :self.num_of_pre_timestep_frames]
 
             # If the autoencoder model is provided, we use it to decode the output
-            output = self.pose_encoder.decode(encoded_output) if self.pose_encoder is not None else encoded_output
+            output = self.pose_encoder.decode(encoded_output) if self.pose_encoder is not None and not gesture_sequence_is_encoded else encoded_output
 
             return output, encoded_gesture_sequence, encoded_output, noisy_gesture_sequence
+
+    def inference(self, starting_point, audio_features, main_agent_id_one_hot):
+        with autocast(device_type=self.device.type, dtype=torch.bfloat16):
+            # Shift the gesture_sequence by one frame
+            shifted_gesture_sequence = torch.roll(starting_point, shifts=-1, dims=1)
+            
+            # Replace the last frame with pure noise
+            shifted_gesture_sequence[0,-1] = torch.zeros_like(shifted_gesture_sequence[0,-1])
+            gesture_sequence = shifted_gesture_sequence
+
+            for stacking_level in range(self.max_timestep_stacking_level):                
+                # We apply noise to the gesture sequence at every iteration because we predict the clean image at every step.                
+                noisy_gesture_sequence = self.diffusion.forward(gesture_sequence, stacking_level)
+
+                gesture_sequence = self.forward(
+                    time_step_stacking_level    = stacking_level,
+                    one_hot_style               = main_agent_id_one_hot,
+                    audio_features              = audio_features, 
+                    noisy_gesture_sequence      = noisy_gesture_sequence
+                )
+
+                if not self.predict_full_duration:
+                    # Ensure the replace_frames does not exceed the length of the gesture sequence
+                    gesture_sequence[:, :self.num_of_pre_timestep_frames] = shifted_gesture_sequence[:, :self.num_of_pre_timestep_frames]
+
+            return gesture_sequence, noisy_gesture_sequence
 
     # Functions for Weights & Biases tracking
     def add_hyperparameters_to_WnB_tracking(self, hyperparameter_dict: dict):
@@ -490,72 +503,58 @@ class ContinuousMotionModel(nn.Module, WnBTrackable):
             }
         }
 
-def load_model(model_checkpoint, device=None):
-    
-    # If a path is provided, load the model checkpoint from the file
-    if isinstance(model_checkpoint, str):
-        model_checkpoint = torch.load(model_checkpoint, map_location='cpu', weights_only=False)['model_state']
+    @staticmethod
+    def load_model(model_checkpoint, device=None):
+        
+        # If a path is provided, load the model checkpoint from the file
+        if isinstance(model_checkpoint, str):
+            model_checkpoint = torch.load(model_checkpoint, map_location='cpu', weights_only=False)['model_state']
 
-    # Extract configuration
-    config = model_checkpoint['config']
+        # Extract configuration
+        config = model_checkpoint['config']
 
-    model = construct_model(config, device)
-    
-    # Fix state_dict keys if compiled with torch.compile
-    state_dict = model_checkpoint['state_dict']
-    if any(key.startswith('_orig_mod.') for key in state_dict):
-        state_dict = {k.replace('_orig_mod.', ''): v for k, v in state_dict.items()}
-    
-    model.load_state_dict(state_dict)
-    return model
-
-# This constructs a new model based on a wandb configuration dictionary, which holds all the hyper parameters for the model.
-def construct_model(config: dict, device):
-    # Get diffusion noise schedule
-    schedule_name = config['diffusion']['name']
-    schedule_func = getattr(Diffusion, f"{schedule_name}", None)
-    noise_schedule = schedule_func(
-        config['diffusion']['beta_min'],
-        config['diffusion']['beta_max']
-    )
-    
-    # Create diffusion model
-    diffusion = Diffusion(
-        device                      = device,
-        num_of_pre_timestep_frames  = config['diffusion']['num_of_pre_timestep_frames'],
-        num_of_timestep_frames      = config['diffusion']['num_of_timestep_frames'],
-        num_of_post_timestep_frames = config['diffusion']['num_of_post_timestep_frames'],
-        noise_schedule              = noise_schedule,
-        num_of_timestep_stackings   = config['diffusion']['num_of_timestep_stackings']
-    )
-    
-    # Create poe encoder if it was used
-    pose_encoder = None
-    if config['pose_encoder']:
-        pose_encoder = PoseEncoder(
-            z_dim       = config['pose_encoder']['z_dim'],
-            pose_dim    = config['pose_encoder']['pose_dim'],
-            device      = device
-        )
-    
-    # TODO: Get rid of this, it is for backwards compatibility
-    if 'general' in config:
-        # Create the main model
-        model = ContinuousMotionModel(
-            n_gesture_length            = config['general']['n_gesture_length'],
-            audio_features_per_frame    = config['general']['audio_features_per_frame'],
-            pose_features_per_frame     = config['general']['pose_features_per_frame'],
-            number_of_styles            = config['general']['number_of_styles'],
-            diffusion                   = diffusion,
-            condition_mask_probabilty   = config['general']['condition_mask_probabilty'],
-            number_of_attention_heads   = config['general']['number_of_attention_heads'],
-            predict_full_duration       = config['general']['predict_full_duration'],
-            pose_encoder                = pose_encoder,
-            device                      = device
-        )
-
+        model = ContinuousMotionModel.construct_model(config, device)
+        
+        # Fix state_dict keys if compiled with torch.compile
+        state_dict = model_checkpoint['state_dict']
+        if any(key.startswith('_orig_mod.') for key in state_dict):
+            state_dict = {k.replace('_orig_mod.', ''): v for k, v in state_dict.items()}
+        
+        model.load_state_dict(state_dict)
         return model
-    else:
+
+    @staticmethod
+    # This constructs a new model based on a wandb configuration dictionary, which holds all the hyper parameters for the model.
+    def construct_model(config: dict, device):
+        # Get diffusion noise schedule
+        schedule_name = config['diffusion']['name']
+        schedule_func = getattr(Diffusion, f"{schedule_name}", None)
+        noise_schedule = schedule_func(
+            config['diffusion']['beta_min'],
+            config['diffusion']['beta_max']
+        )
+        
+        # Create diffusion model
+        diffusion = Diffusion(
+            device                      = device,
+            num_of_pre_timestep_frames  = config['diffusion']['num_of_pre_timestep_frames'],
+            num_of_timestep_frames      = config['diffusion']['num_of_timestep_frames'],
+            num_of_post_timestep_frames = config['diffusion']['num_of_post_timestep_frames'],
+            noise_schedule              = noise_schedule,
+            num_of_timestep_stackings   = config['diffusion']['num_of_timestep_stackings']
+        )
+        
+        # Create pose encoder if it was used
+        pose_encoder = None
+        if config['pose_encoder']:
+            pose_encoder_type = config['pose_encoder']['type']
+            checkpoint_name = config['pose_encoder']['checkpoint_name']
+
+            if pose_encoder_type == 'vae_pose_encoder':
+                pose_encoder = VAEPoseEncoder.load_from_checkpoint(checkpoint_name, device)
+            elif pose_encoder_type == 'advanced_pose_encoder':
+                pose_encoder = AdvancedPoseEncoder.load_from_checkpoint(checkpoint_name, device)
+        
         # Create the main model
         model = ContinuousMotionModel(
             n_gesture_length            = config['n_gesture_length'],
@@ -568,6 +567,6 @@ def construct_model(config: dict, device):
             predict_full_duration       = config['predict_full_duration'],
             pose_encoder                = pose_encoder,
             device                      = device
-        )
+        ).to(device)
 
         return model

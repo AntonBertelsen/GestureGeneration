@@ -204,8 +204,17 @@ def train_advanced_encoder(
                 print(f"Visualization error: {e}")
 
     # Save the trained model
+
     os.makedirs("pose_encoder/models", exist_ok=True)
-    torch.save(model.state_dict(), f"pose_encoder/models/{model_name}.pth")
+    # Collect all data needed for reconstruction
+    save_data = {
+        'state_dict': model.state_dict(),
+        'hyperparameters': model.hyperparameter_dict_to_WnB_tracking,
+        'skeleton': model.skeleton
+    }
+    
+    # Save everything in a single file
+    torch.save(save_data, f"pose_encoder/models/{model_name}.pth")
     print(f"Model saved to pose_encoder/models/{model_name}.pth")
     return model
 

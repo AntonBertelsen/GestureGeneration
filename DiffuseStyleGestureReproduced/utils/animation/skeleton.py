@@ -34,6 +34,11 @@ class Skeleton:
         self.world_pos_std_pose = None  # Standard deviation for world positions
 
         self.device = torch.device('cpu')  # Default device
+
+        self._joint_order = []  # Topologically ordered joint list
+        self._joint_index_map = {}  # Maps joint name to its index
+        self._parent_indices = []  # Maps joint index to parent index
+        self._joint_offsets_tensor = None  # Cached tensor of joint offsets
     
     def set_device(self, device: torch.device) -> None:
         """Set the device for tensor operations."""
@@ -42,6 +47,7 @@ class Skeleton:
         self.std_pose = self.std_pose.to(device) if self.std_pose is not None else None
         self.world_pos_mean_pose = self.world_pos_mean_pose.to(device) if self.world_pos_mean_pose is not None else None
         self.world_pos_std_pose = self.world_pos_std_pose.to(device) if self.world_pos_std_pose is not None else None
+        self._joint_offsets_tensor = self._joint_offsets_tensor.to(device) if self._joint_offsets_tensor is not None else None
 
     def set_mean_std(self, mean_pose: np.ndarray, std_pose: np.ndarray, world_pos_mean_pose: np.ndarray = None, world_Pos_mean_std: np.ndarray = None) -> None:
         """Set the mean and standard deviation for normalization."""
@@ -145,7 +151,58 @@ class Skeleton:
                                                        output_idx + 4,
                                                        output_idx + 5]
                 output_idx += 6
+        
+        self._compute_joint_order()
     
+    def _compute_joint_order(self):
+        """Precompute optimal joint processing order and related data structures."""
+        # Reset data structures
+        self._joint_order = []
+        self._joint_index_map = {}
+        self._parent_indices = []
+        
+        # Get target joints or all joints
+        target_joints = self.target_joints if self.target_joints else self.joints
+        
+        # Compute topological ordering
+        processed = set()
+        
+        # Start with root
+        for joint in target_joints:
+            if joint == 'body_world' or self.joint_parent.get(joint) is None:
+                self._add_joint_to_order(joint, processed)
+        
+        # Cache joint offsets as tensor
+        offsets = torch.zeros((len(self._joint_order), 3), device=self.device)
+        for i, joint in enumerate(self._joint_order):
+            offset = self.joint_offsets.get(joint, [0, 0, 0])
+            offsets[i] = torch.tensor(offset, device=self.device)
+        self._joint_offsets_tensor = offsets
+        
+    def _add_joint_to_order(self, joint, processed):
+        """Helper to add joint and its children to the ordering."""
+        if joint in processed:
+            return
+            
+        # Add joint to order
+        self._joint_order.append(joint)
+        idx = len(self._joint_order) - 1
+        self._joint_index_map[joint] = idx
+        
+        # Find parent index
+        parent = self.joint_parent.get(joint)
+        parent_idx = -1
+        if parent in self._joint_index_map:
+            parent_idx = self._joint_index_map[parent]
+        self._parent_indices.append(parent_idx)
+        
+        processed.add(joint)
+        
+        # Process children
+        for child in self.joints:
+            if self.joint_parent.get(child) == joint:
+                self._add_joint_to_order(child, processed)
+                
     def get_channel_count(self) -> int:
         """Get the number of channels in the extracted data."""
         count = 0
@@ -345,6 +402,158 @@ class Skeleton:
             return flattened_world_positions, world_rotations
         
         return flattened_world_positions
+
+    def calculate_world_positions_new(self, frame_data: torch.Tensor, joints_to_calculate=None, return_rotations=False) -> torch.Tensor:
+        """Calculate world positions using forward kinematics (optimized version)."""
+        # Convert numpy to tensor if needed
+        if isinstance(frame_data, np.ndarray):
+            frame_data = torch.tensor(frame_data, dtype=torch.float32, device=self.device)
+
+        # Handle batch dimension
+        has_batch_dim = len(frame_data.shape) == 3
+        if not has_batch_dim:
+            frame_data = frame_data.unsqueeze(0)
+        batch_size, num_frames, _ = frame_data.shape
+        
+        # Determine which joints to process
+        if joints_to_calculate is None:
+            target_indices = list(range(len(self._joint_order)))
+        else:
+            # Find indices of requested joints and their ancestors
+            target_indices = set()
+            for joint in joints_to_calculate:
+                if joint in self._joint_index_map:
+                    idx = self._joint_index_map[joint]
+                    while idx != -1:
+                        target_indices.add(idx)
+                        idx = self._parent_indices[idx]
+                else:
+                    raise ValueError(f"Joint '{joint}' not found in skeleton. Available joints: {list(self._joint_index_map.keys())}")
+            target_indices = sorted(list(target_indices))
+        
+        num_joints = len(target_indices)
+        
+        # Create tensors for positions and rotations
+        world_positions = torch.zeros((batch_size, num_frames, num_joints, 3), device=frame_data.device)
+        world_rotations = torch.zeros((batch_size, num_frames, num_joints, 3, 3), device=frame_data.device)
+        
+        # Extract all 6D rotations at once
+        local_rotations = {}
+        for i, joint_idx in enumerate(target_indices):
+            joint_name = self._joint_order[joint_idx]
+            
+            # Handle root position
+            if joint_name == 'body_world' and joint_name in self.bone_to_indices_map:
+                root_idx = self.bone_to_indices_map[joint_name][0]
+                world_positions[:, :, i] = frame_data[:, :, root_idx:root_idx+3]
+                # Identity rotation for root
+                world_rotations[:, :, i] = torch.eye(3, device=frame_data.device).unsqueeze(0).unsqueeze(0).expand(batch_size, num_frames, 3, 3)
+                continue
+                
+            # Get joint rotation indices
+            if joint_name in self.bone_to_indices_map:
+                rot_indices = self.bone_to_indices_map[joint_name]
+                if len(rot_indices) == 6:  # 6D rotation
+                    start_idx = rot_indices[0]
+                    local_rotations[i] = frame_data[:, :, start_idx:start_idx+6]
+        
+        # Convert all 6D rotations to matrices in one batch operation
+        if local_rotations:
+            all_rot_indices = list(local_rotations.keys())
+            stacked_rots = torch.cat([local_rotations[i].unsqueeze(2) for i in all_rot_indices], dim=2)
+            # Reshape to [batch*frames*joints, 6]
+            flat_rots = stacked_rots.reshape(-1, 6)
+            # Convert to matrices
+            flat_matrices = convert_6d_to_matrix(flat_rots)
+            # Reshape back
+            matrices = flat_matrices.reshape(batch_size, num_frames, len(all_rot_indices), 3, 3)
+            
+            # Assign back to local rotations
+            for i, rot_idx in enumerate(all_rot_indices):
+                local_rotations[rot_idx] = matrices[:, :, i]
+        
+        # Process joints in order
+        idx_map = {joint_idx: i for i, joint_idx in enumerate(target_indices)}
+        for i, joint_idx in enumerate(target_indices):
+            joint_name = self._joint_order[joint_idx]
+            parent_idx = self._parent_indices[joint_idx]
+            
+            # Skip root as it's already processed
+            if joint_name == 'body_world':
+                continue
+                
+            # Skip if parent not in target indices
+            if parent_idx == -1 or parent_idx not in idx_map:
+                continue
+                
+            parent_pos_idx = idx_map[parent_idx]
+            
+            # Get local rotation or use identity
+            local_rot = torch.eye(3, device=frame_data.device).unsqueeze(0).unsqueeze(0).expand(batch_size, num_frames, 3, 3)
+            if i in local_rotations:
+                local_rot = local_rotations[i]
+                
+            # Get parent rotation
+            parent_rot = world_rotations[:, :, parent_pos_idx]
+            
+            # Calculate world rotation
+            world_rotations[:, :, i] = torch.matmul(parent_rot, local_rot)
+            
+            # Get joint offset
+            offset = self._joint_offsets_tensor[joint_idx].view(1, 1, 3)
+            
+            # Calculate rotated offset
+            rotated_offset = torch.matmul(
+                parent_rot,
+                offset.unsqueeze(-1)
+            ).squeeze(-1)
+            
+            # Calculate world position
+            world_positions[:, :, i] = world_positions[:, :, parent_pos_idx] + rotated_offset
+        
+        # Reshape positions for output - keep the full target_joints shape
+        if self.target_joints:
+            # Create an output tensor sized for ALL target joints
+            target_joint_names = self.target_joints
+            full_output = torch.zeros((batch_size, num_frames, len(target_joint_names), 3), device=frame_data.device)
+            
+            # Map the calculated joints to their positions in the full output tensor
+            for i, joint_idx in enumerate(target_indices):
+                joint_name = self._joint_order[joint_idx]
+                if joint_name in target_joint_names:
+                    target_idx = target_joint_names.index(joint_name)
+                    full_output[:, :, target_idx] = world_positions[:, :, i]
+            
+            output_positions = full_output.reshape(batch_size, num_frames, -1)
+        else:
+            # If no target_joints specified, use all joints
+            full_output = torch.zeros((batch_size, num_frames, len(self.joints), 3), device=frame_data.device)
+            
+            # Map the calculated joints to their positions in the full output tensor
+            for i, joint_idx in enumerate(target_indices):
+                joint_name = self._joint_order[joint_idx]
+                full_idx = self.joints.index(joint_name)
+                full_output[:, :, full_idx] = world_positions[:, :, i]
+            
+            output_positions = full_output.reshape(batch_size, num_frames, -1)
+
+        # Also handle the rotation dictionary similarly if needed
+        if return_rotations:
+            # Format rotations dictionary for all target joints
+            rot_dict = {}
+            
+            # Add all calculated joints to the dictionary
+            for i, joint_idx in enumerate(target_indices):
+                joint_name = self._joint_order[joint_idx]
+                if self.target_joints is None or joint_name in self.target_joints or (joints_to_calculate is not None and joint_name in joints_to_calculate):
+                    rot_dict[joint_name] = world_rotations[:, :, i]
+            
+            # Print for debugging
+            # print(f"Final rotation dictionary keys: {list(rot_dict.keys())}")
+            
+            if not has_batch_dim:
+                rot_dict = {k: v.squeeze(0) for k, v in rot_dict.items()}
+            return output_positions, rot_dict
 
     def pose_to_websocket_format(self, pose):   
         # Use a dictionary with bone names as keys instead of an array

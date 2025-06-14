@@ -132,10 +132,11 @@ def send_message(message):
     loop.run_until_complete(send_to_all())
 
 # Initialize servers and display visualization
-def init_visualization():
+def init_visualization(display = True):
     # If already initialized, we simply display the viewer with the current state
     if state['visualization_initialized'] and state['websocket_port']:
-        display_viewer()
+        if display:
+            display_viewer()
     else:
         # We need to initialize the servers
         # Check if HTTP port 8000 is in use but not by our server
@@ -159,13 +160,17 @@ def init_visualization():
         time.sleep(1.0)
 
         # Now we can display the viewer
-        display_viewer()
+        if display:
+            display_viewer()
 
         # Mark the visualization as initialized
         state['visualization_initialized'] = True
+    
+    if not display:
+        return f"http://localhost:{state['http_server_port']}/utils/animation/visualisation/new/animation_viewer4.html?wsport={state['websocket_port']}"
 
 def display_viewer():
-    html_file_path = f"http://localhost:{state['http_server_port']}/utils/animation/visualisation/new/animation_viewer2.html?wsport={state['websocket_port']}"
+    html_file_path = f"http://localhost:{state['http_server_port']}/utils/animation/visualisation/new/animation_viewer4.html?wsport={state['websocket_port']}"
     print(f"Viewer URL: {html_file_path}")
     
     iframe_html = f'<iframe src="{html_file_path}" width="512" height="512" frameborder="0"></iframe><br>'

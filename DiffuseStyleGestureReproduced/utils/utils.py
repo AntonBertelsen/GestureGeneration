@@ -4,6 +4,13 @@ import glob
 
 def convert_6d_to_matrix(rot_6d_batch: torch.Tensor) -> torch.Tensor:
     """Convert 6D rotation representation to rotation matrices."""
+
+    input_dim = len(rot_6d_batch.shape)
+
+    if input_dim == 2:
+        # If input is 2D, add a batch dimension
+        rot_6d_batch = rot_6d_batch.unsqueeze(0)
+
     batch_size = rot_6d_batch.shape[0]
     num_frames = rot_6d_batch.shape[1]
     
@@ -16,7 +23,7 @@ def convert_6d_to_matrix(rot_6d_batch: torch.Tensor) -> torch.Tensor:
     col2_norm = torch.linalg.norm(col2, axis=2, keepdims=True)
     col1 = col1 / col1_norm
     col2 = col2 / col2_norm
-    
+
     # Compute cross product for third column (vectorized)
     col3 = torch.linalg.cross(col1, col2)
     
@@ -25,6 +32,10 @@ def convert_6d_to_matrix(rot_6d_batch: torch.Tensor) -> torch.Tensor:
     matrices[:, :, :, 0] = col1
     matrices[:, :, :, 1] = col2
     matrices[:, :, :, 2] = col3
+
+    if input_dim == 2:
+        # If input was 2D, remove the batch dimension
+        matrices = matrices.squeeze(0)
     
     return matrices
 
@@ -33,7 +44,7 @@ def convert_matrix_to_6d(rot_matrix_batch: torch.Tensor) -> torch.Tensor:
     rot_6d = rot_matrix_batch.permute(0, 1, 3, 2)[:, :, :2, :].reshape(batch_size, num_frames, 6)
     return rot_6d
 
-def get_latest_model_path(directory: str, return_folder=False) -> str:
+def get_latest_model_path(directory: str = "v1_models", return_folder = False) -> str:
     # Find the newest folder
     folders = sorted(glob.glob(os.path.join(directory, '*')), key=os.path.getmtime)
     if not folders:
