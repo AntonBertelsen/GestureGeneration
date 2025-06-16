@@ -331,16 +331,17 @@ def train(
         # Log the validation losses and frechet distance to wandb at the end of each epoch
         if run is not None:
             # Log all validation loss components
+            print("LOGGING VALUDATION!!! TO W&B")
             run.log({
-                "validation_total_loss": val_loss_rec['loss'][1][-1] if val_loss_rec['loss'][1] else 0,
-                "validation_reconstruction_loss": val_loss_rec['reconstruction_loss'][1][-1] if val_loss_rec['reconstruction_loss'][1] else 0,
-                "validation_encoded_latent_space_loss": val_loss_rec['encoded_latent_space_loss'][1][-1] if val_loss_rec['encoded_latent_space_loss'][1] else 0,
-                "validation_variance_loss": val_loss_rec['variance_loss'][1][-1] if val_loss_rec['variance_loss'][1] else 0,
-                "validation_velocity_loss": val_loss_rec['velocity_loss'][1][-1] if val_loss_rec['velocity_loss'][1] else 0,
-                "validation_acceleration_loss": val_loss_rec['acceleration_loss'][1][-1] if val_loss_rec['acceleration_loss'][1] else 0,
-                "validation_jerk_loss": val_loss_rec['jerk_loss'][1][-1] if val_loss_rec['jerk_loss'][1] else 0,
-                "validation_frechet_distance": frechet_distance_rec['encoded'][-1] if frechet_distance_rec['encoded'] else 0,
-            }, step=epoch * epoch_length)
+                "validation/total_loss": val_loss_rec['loss'][1][-1] if val_loss_rec['loss'][1] else 0,
+                "validation/reconstruction_loss": val_loss_rec['reconstruction_loss'][1][-1] if val_loss_rec['reconstruction_loss'][1] else 0,
+                "validation/encoded_latent_space_loss": val_loss_rec['encoded_latent_space_loss'][1][-1] if val_loss_rec['encoded_latent_space_loss'][1] else 0,
+                "validation/variance_loss": val_loss_rec['variance_loss'][1][-1] if val_loss_rec['variance_loss'][1] else 0,
+                "validation/velocity_loss": val_loss_rec['velocity_loss'][1][-1] if val_loss_rec['velocity_loss'][1] else 0,
+                "validation/acceleration_loss": val_loss_rec['acceleration_loss'][1][-1] if val_loss_rec['acceleration_loss'][1] else 0,
+                "validation/jerk_loss": val_loss_rec['jerk_loss'][1][-1] if val_loss_rec['jerk_loss'][1] else 0,
+                "validation/frechet_distance": frechet_distance_rec['encoded'][-1] if frechet_distance_rec['encoded'] else 0,
+            }, step=(epoch+1) * epoch_length)
 
     # close the wandb (W&B) run
     if run is not None: 
