@@ -13,3 +13,4 @@ moviepy # for generatting videos of the defussion and generation processes - mai
 wandb
 sounddevice
 IPython
+websockets

@@ -108,10 +108,10 @@ def evaluate_frechet_gesture_distance(
 
         # Send every frame in the original gesture sequence to the animation visualisation
         
-        animation_visualisation.send_debug_tensor(output[0].cpu(), "generated gesture sequence")
-        for frame in denormalized_output[0]:
-            animation_visualisation.send_pose(frame.cpu(), skeleton)
-            time.sleep( 1 / 30)
+        # animation_visualisation.send_debug_tensor(output[0].cpu(), "generated gesture sequence")
+        # for frame in denormalized_output[0]:
+        #     animation_visualisation.send_pose(frame.cpu(), skeleton)
+        #     time.sleep( 1 / 30)
 
         # Now we want to calcualte world postions from the denormalized output tensor
         world_positions = skeleton.calculate_world_positions(denormalized_output)
@@ -141,10 +141,10 @@ def evaluate_frechet_gesture_distance(
         
 
         # Send every frame in the original gesture sequence to the animation visualisation
-        animation_visualisation.send_debug_tensor(original_gesture_sequence[0].cpu(), "generated gesture sequence")
-        for frame in denormalized_original_gesture_sequence[0]:
-            animation_visualisation.send_pose(frame.cpu(), skeleton)
-            time.sleep( 1 / 30)
+        # animation_visualisation.send_debug_tensor(original_gesture_sequence[0].cpu(), "generated gesture sequence")
+        # for frame in denormalized_original_gesture_sequence[0]:
+        #     animation_visualisation.send_pose(frame.cpu(), skeleton)
+        #     time.sleep( 1 / 30)
 
         normalized_original_world_positions = skeleton.normalize_world_positions(world_positions)
 
