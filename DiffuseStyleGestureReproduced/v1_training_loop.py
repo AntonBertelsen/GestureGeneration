@@ -148,12 +148,11 @@ def train(
     # There are other backends available, but cudagraphs is the only one I could get working on Windows.
     # In Andrej Kaparthy's gpt video he uses a different backend.
     if device.type == 'cuda':
-        model = torch.compile(model, backend="cudagraphs")
+        model = torch.compile(model)
 
     epoch_length = len(training_loader)
 
-
-    display_url = animation_visualisation.init_visualization(display=False)  # Initialize the animation visualization, but don't display it yet
+    # display_url = animation_visualisation.init_visualization(display=False)  # Initialize the animation visualization, but don't display it yet
 
     # Main training loop, where we iterate over the number of epochs and the training data.
     for epoch in range(start_epoch, num_epochs):
@@ -214,44 +213,63 @@ def train(
                                       f"\033[94mFrechet distance": f"{frechet_distance_rec['encoded'][-1] if frechet_distance_rec['encoded'] else 0}\033[0m"})
             
             # log the loss to wandb (W&B)
-            if run is not None: 
-                step = i + epoch * epoch_length
-                run.log({"total_loss": total_loss.item()}, step=step)
+            # if run is not None: 
+            #     step = i + epoch * epoch_length
+            #     run.log({"total_loss": total_loss.item()}, step=step)
 
             # Visualization
-            if i % visualize_step == 0 and not is_running_on_slurm() and should_visualize_training_progress:
-                visualize_training_progress(
-                    full_gesture_sequence               = gesture_sequence,
-                    full_denoised_gesture_sequence      = output,
-                    encoded_gesture_sequence            = encoded_gesture_sequence,
-                    encoded_denoised_gesture_sequence   = encoded_output,
-                    noisy_gesture_sequence              = noisy_gesture_sequence,
-                    using_pose_encoder                  = model.pose_encoder is not None and not training_loader.dataset.loading_encoded_data,
-                    train_loss_rec                      = train_loss_rec,
-                    val_loss_rec                        = val_loss_rec,
-                    frechet_distance_rec                = frechet_distance_rec,
-                    visualize_step                      = visualize_step,
-                    frame_weighting                     = frame_weighting
-                )
-                print("Visualize results at", display_url)  # Display the animation visualization URL
+            if i % visualize_step == 0:
+                
+                # Calculate averaged losses over the last visualize_step and store in the loss records.
+                for key in train_loss_rec.keys():
+                    train_loss_rec[key][1].append(np.mean(train_loss_rec[key][0][-visualize_step:]))
+                
+                # Log the results to wandb (W&B) if a run is provided.
+                if run is not None:
+                    run.log({
+                        "total_loss": total_loss.item(),
+                        "reconstruction_loss": train_loss_rec['reconstruction_loss'][1][-1],
+                        "encoded_latent_space_loss": train_loss_rec['encoded_latent_space_loss'][1][-1],
+                        "variance_loss": train_loss_rec['variance_loss'][1][-1],
+                        "velocity_loss": train_loss_rec['velocity_loss'][1][-1],
+                        "acceleration_loss": train_loss_rec['acceleration_loss'][1][-1],
+                        "jerk_loss": train_loss_rec['jerk_loss'][1][-1]
+                    }, step = i + epoch * epoch_length)
+
+                if not is_running_on_slurm() and should_visualize_training_progress:
+                    visualize_training_progress(
+                        full_gesture_sequence               = gesture_sequence,
+                        full_denoised_gesture_sequence      = output,
+                        encoded_gesture_sequence            = encoded_gesture_sequence,
+                        encoded_denoised_gesture_sequence   = encoded_output,
+                        noisy_gesture_sequence              = noisy_gesture_sequence,
+                        using_pose_encoder                  = model.pose_encoder is not None and not training_loader.dataset.loading_encoded_data,
+                        train_loss_rec                      = train_loss_rec,
+                        val_loss_rec                        = val_loss_rec,
+                        frechet_distance_rec                = frechet_distance_rec,
+                        visualize_step                      = visualize_step,
+                        frame_weighting                     = frame_weighting
+                    )
+                    # print("Visualize results at", display_url)  # Display the animation visualization URL
                 
         ########################################################################
         # End of epoch
         ########################################################################
 
-        save_model_checkpoint(
-            model                   = model,
-            checkpoint_dir          = model_checkpoint_dir,
-            model_name              = current_model_name,
-            epoch                   = epoch,
-            hyper_parameters        = hyper_parameters,
-            optimizer               = optimizer,
-            train_loss_rec          = train_loss_rec,
-            val_loss_rec            = val_loss_rec,
-            frechet_distance_rec    = frechet_distance_rec,
-            upload                  = upload_model_check_point,
-            run                     = run
-        )
+        if epoch % 10 == 0:
+            save_model_checkpoint(
+                model                   = model,
+                checkpoint_dir          = model_checkpoint_dir,
+                model_name              = current_model_name,
+                epoch                   = epoch,
+                hyper_parameters        = hyper_parameters,
+                optimizer               = optimizer,
+                train_loss_rec          = train_loss_rec,
+                val_loss_rec            = val_loss_rec,
+                frechet_distance_rec    = frechet_distance_rec,
+                upload                  = upload_model_check_point,
+                run                     = run
+            )
 
         train_loss_rec['epoch_loss'][0].append(np.mean(train_loss_rec['loss'][0][-epoch_length:]))
 
@@ -265,7 +283,7 @@ def train(
             val_loader        = val_loader,
             device            = device,
             evaluation_length = 30,
-            num_samples       = 256,
+            num_samples       = 8192,
             calculate_raw_frechet_distance = False
         )
 
@@ -310,9 +328,19 @@ def train(
             # clear the losses for the next epoch
             val_loss_rec[key][0].clear()
         
-        # Log the losses to wandb (W&B) if a run is provided.
-        if run is not None: 
-            run.log({"validation loss": val_loss_rec[key][1][-1]}, step = epoch * epoch_length)
+        # Log the validation losses and frechet distance to wandb at the end of each epoch
+        if run is not None:
+            # Log all validation loss components
+            run.log({
+                "validation_total_loss": val_loss_rec['loss'][1][-1] if val_loss_rec['loss'][1] else 0,
+                "validation_reconstruction_loss": val_loss_rec['reconstruction_loss'][1][-1] if val_loss_rec['reconstruction_loss'][1] else 0,
+                "validation_encoded_latent_space_loss": val_loss_rec['encoded_latent_space_loss'][1][-1] if val_loss_rec['encoded_latent_space_loss'][1] else 0,
+                "validation_variance_loss": val_loss_rec['variance_loss'][1][-1] if val_loss_rec['variance_loss'][1] else 0,
+                "validation_velocity_loss": val_loss_rec['velocity_loss'][1][-1] if val_loss_rec['velocity_loss'][1] else 0,
+                "validation_acceleration_loss": val_loss_rec['acceleration_loss'][1][-1] if val_loss_rec['acceleration_loss'][1] else 0,
+                "validation_jerk_loss": val_loss_rec['jerk_loss'][1][-1] if val_loss_rec['jerk_loss'][1] else 0,
+                "validation_frechet_distance": frechet_distance_rec['encoded'][-1] if frechet_distance_rec['encoded'] else 0,
+            }, step=epoch * epoch_length)
 
     # close the wandb (W&B) run
     if run is not None: 
@@ -324,7 +352,6 @@ def train(
         checkpoint_dir          = model_checkpoint_dir,
         model_name              = current_model_name + "_final",
         epoch                   = num_epochs-1,
-        step                    = len(training_loader),
         hyper_parameters        = hyper_parameters,
         optimizer               = optimizer,
         train_loss_rec          = train_loss_rec,
@@ -477,10 +504,6 @@ def visualize_training_progress(
     ):
     
     clear_output(wait=True)
-
-    # Calculate averaged losses over the last visualize_step and store in the loss records.
-    for key in train_loss_rec.keys():
-        train_loss_rec[key][1].append(np.mean(train_loss_rec[key][0][-visualize_step:]))
 
     # Create a single figure with GridSpec to manage all plots
     # Height ratios for each row
