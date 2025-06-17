@@ -1,200 +1,93 @@
 import torch
-from typing import Union
-import math
-from typing import Callable
-from utils.WnB_trackable import WnBTrackable
+from typing import Callable, Union
+from diffusion import *
 
-class Diffusion(WnBTrackable):
+class SlidingDiffusion(Diffusion):
 
     def __init__(self, 
-                 device: str,
-                 num_of_pre_timestep_frames: int, 
-                 num_of_timestep_frames: int, 
-                 num_of_post_timestep_frames: int,
+                 num_clean_frames: int, 
+                 num_denoise_frames: int, 
+                 num_noise_frames: int,
+                 num_timestep_stackings: int,
                  noise_schedule: tuple[Callable[[int, int], float], dict[str, Union[str, int, float, bool]]],
-                 num_of_timestep_stackings: int = 1,):
-        
-        # OBS: 
-        # number of deffusion steps for each frame is definded by num_of_timestep_frames * num_of_timestep_stackings
+                 device: str
+        ):
 
-        self.device = device
-        self.num_of_pre_timestep_frames = num_of_pre_timestep_frames
-        self.num_of_timestep_frames = num_of_timestep_frames
-        self.num_of_post_timestep_frames = num_of_post_timestep_frames
-        self.num_of_timestep_stackings = num_of_timestep_stackings
-
-        # This is the noise schedule function that will be used to add noise at diffrent levels, given a timestamp, and a max number of timestpes.
+        self.noise_schedule_hyper_params: dict[str, Union[str, int, float, bool]] = noise_schedule[1]
         self.noise_schedule: Callable[[int, int], float] = noise_schedule[0]
 
-        # This is a dictionary with the hyperparameters used for W&B tracking
-        self.noise_schedule_hyper_params: dict[str, Union[str, int, float, bool]] = noise_schedule[1] 
+        self.num_timestep_stackings = num_timestep_stackings
+        self.num_clean_frames = num_clean_frames
+        self.num_denoise_frames = num_denoise_frames
+        self.num_noise_frames = num_noise_frames
 
-        # In order to train faster we want to be able to jump to any level of noise at any time.
-        # To do this, we precalculate the amount of noise that would have been added at any timestep. This means adding up noise
-        # From all previous timesteps. We can cheat by simply scaling beta / alpha
-        
-        # We may stack timesteps to minimise delay in the forward pass.
-        # The timestep vector goes from this when thre is no stacking:
-        # [1, 2, 3, 4, 5, 6, ...]
-        # To this when there is stacking of 3
-        # [1, 4, ...], [2, 5, ...], [3, 6, ...]
-        self.time_step_stackings: list[tuple[torch.tensor, torch.tensor]] = []
-        for time_step_stacking_index in range(num_of_timestep_stackings):
-            # Precalculate all beta values - accoring to the coresponing to time_step_stacking_index aka the stacking step.
-            self.beta_values = torch.tensor(
-                [self.noise_schedule(
-                    (t + 1) * num_of_timestep_stackings - (time_step_stacking_index % num_of_timestep_stackings), 
-                    self.num_of_timestep_frames) for t in range(self.num_of_timestep_frames)]
-            )
-            self.beta_values.to(self.device)
-            # Alpha is 1 - beta, so here we precalculate all alpha values
-            self.alpha_values = 1 - self.beta_values
-            # We also precalculate the cumulative product of alpha values. This is what will allow us to jump to any timestep in a single step.
-            self.alpha_hat_values = torch.cumprod(self.alpha_values, dim=0)
+        # We support stacking timesteps to allow multiple denoising steps for every frame slide.
+        # I.e. with a stacking level for 3 the timesteps will be stacked like this: [1, 2, 3, 4, 5, 6, ...] --> [1, 4, ...], [2, 5, ...], [3, 6, ...]
+        frame_timesteps_list = []
+        sqrt_alpha_hats_list = []
+        sqrt_one_minus_alpha_hats_list = []
 
-            # and we precalculate the square roots so we dont have to do them in every field in the 
-            # tensor since they are all identical
-            self.sqrt_alpha_hats = torch.sqrt(self.alpha_hat_values)
-            self.sqrt_one_minus_alpha_hats = torch.sqrt(1 - self.alpha_hat_values)
+        for stacking_step in range(num_timestep_stackings):
+            clean_frames_timesteps = [0] * num_clean_frames
+            denoise_frames_timesteps = [stacking_step + frame * num_timestep_stackings for frame in range(num_denoise_frames)]
+            noise_frames_timesteps = [num_denoise_frames * num_timestep_stackings] * num_noise_frames
             
-            # Finaly, we precalculate the sqrt_alpha_hat and sqrt_one_minus_alpha_hat vectors for each timestep
-            # These vectores are then padded with 1s and 0s in the pre-timestep and post-timestep frames, to ensure that 
-            # the pre-timestep frames are not noised, and the post-timestep frames are fully noised, in the forward function.
-            self.sqrt_alpha_hats = [1] * self.num_of_pre_timestep_frames + self.sqrt_alpha_hats.tolist() + [0] * self.num_of_post_timestep_frames
-            self.sqrt_one_minus_alpha_hats = [0] * self.num_of_pre_timestep_frames + self.sqrt_one_minus_alpha_hats.tolist() + [1] * self.num_of_post_timestep_frames
+            frame_timesteps = torch.tensor(clean_frames_timesteps + denoise_frames_timesteps + noise_frames_timesteps, device=device)
 
-            # Turn it back into tensors
-            self.sqrt_alpha_hats = torch.tensor(self.sqrt_alpha_hats).to(self.device)
-            self.sqrt_one_minus_alpha_hats = torch.tensor(self.sqrt_one_minus_alpha_hats).to(self.device)
-            # The underlying math is still
-            # noised_squence_collumn = sqrt_alpha_hat * image + sqrt_one_minus_alpha_hat * noise TODO: check this
-            #
-            # For the pre-timestep frames, the sqrt_alpha_hat is 1, and the sqrt_one_minus_alpha_hat is 0:
-            # noised_squence_collumn = 1 * squence_collumn + 0 * noise = squence_collumn = squence_collumn
-            #
-            # For the post-timestep frames, the sqrt_alpha_hat is 0, and the sqrt_one_minus_alpha_hat is 1:
-            # noised_squence_collumn = 0 * squence_collumn + 1 * noise = noise = noise
+            # we precalculate beta values according to the coresponing stacking step.
+            beta_values = torch.tensor([self.noise_schedule(frame_timestep, num_denoise_frames * num_timestep_stackings) for frame_timestep in frame_timesteps], device=device)
+            
+            # We replace all the values in clean frames with 0, since they are not suppoed to be noised at all.
+            beta_values[:num_clean_frames] = 0.0
+            
+            # Alpha is 1 - beta, so here we precalculate all alpha values
+            alpha_values = 1 - beta_values
+            
+            # We also precalculate the cumulative product of alpha values. This is what will allow us to jump to any timestep in a single step.
+            alpha_hat_values = torch.cumprod(alpha_values, dim=0)
 
-            self.time_step_stackings.append((self.sqrt_alpha_hats, self.sqrt_one_minus_alpha_hats))
+            # and we precalculate the square roots
+            sqrt_alpha_hats = torch.sqrt(alpha_hat_values)            
+            sqrt_one_minus_alpha_hats = torch.sqrt(1 - alpha_hat_values)
+
+            frame_timesteps_list.append(frame_timesteps)  # Add a dimension for the stacking level
+            sqrt_alpha_hats_list.append(sqrt_alpha_hats)
+            sqrt_one_minus_alpha_hats_list.append(sqrt_one_minus_alpha_hats)
+
+        self.frame_timesteps_stacked = torch.stack(frame_timesteps_list)
+        self.sqrt_alpha_hats_stacked = torch.stack(sqrt_alpha_hats_list)
+        self.sqrt_one_minus_alpha_hats_stacked = torch.stack(sqrt_one_minus_alpha_hats_list)
 
 
-        # print("self.time_step_stackings", self.time_step_stackings)
-
-    def forward(self, sequence_tensor: torch.Tensor, stacking_level = 0) -> torch.Tensor:
-
-        assert(0 <= stacking_level <= self.num_of_timestep_stackings), "Stacking level is out of range. Must be less than or equal to num_of_timestep_stackings"
-
-        # 1 - We use the provided noise schedule funtion to get the intensity (?) of the noise at the current time step.
-        #     This is a value between 0 and 1, and determine the amount of noise to add to the 'image'.
-        #     Some noise schedules, like cosine and sigmoid, require a hyperparam, but this is already gien as a paramenter.
-        # beta = self.noise_schedule(current_timestep, self.num_of_timestep_frames)
-        # beta = self.beta_values[current_timestep]
+    def forward(self, sequence_tensor: torch.Tensor, timestep: torch.Tensor = 0) -> torch.Tensor:
+        # We generate a tensor of gaussian noise with the same shape as the sequence_tensor
+        noise = torch.randn_like(sequence_tensor, device=sequence_tensor.device)
         
-        # 2 - We generate a tensor of noise with the same shape as the the 'image' tensor
-        #     In torch.randn_like each elements are from a Gaussian distribution by default.
-        noise = torch.randn_like(sequence_tensor)
+        sqrt_alpha_hats = self.sqrt_alpha_hats_stacked[timestep]
+        sqrt_one_minus_alpha_hats = self.sqrt_one_minus_alpha_hats_stacked[timestep]
 
-        # 3 - We use the same device as the 'image' tensor for this noice tensor
-        noise = noise.to(self.device)
+        # Calculate the noised image
+        noised_image = sqrt_alpha_hats * sequence_tensor + sqrt_one_minus_alpha_hats * noise
         
-        # 4 - Compute the noising of the culoumns in the timestep frame section.
-        #     We do this by multipling with our pre-prepared sqrt_alpha_hat and sqrt_one_minus_alpha_hat vectores. 
-        #     To not aplay noise to the pre-timestep frames and aply full noise to the post-timestep frames,
-        #     we have allready added 1 and 0s in the apropeate places in the pre calculated vectors 
-        #
-        #     The underlying math is still
-        #     noised_squence_collumn = sqrt_alpha_hat * image + sqrt_one_minus_alpha_hat * noise TODO: check this
-        #
-        #     For the pre-timestep frames, the sqrt_alpha_hat is 1, and the sqrt_one_minus_alpha_hat is 0:
-        #     noised_squence_collumn = 1 * squence_collumn + 0 * noise = squence_collumn = squence_collumn
-        #
-        #     For the post-timestep frames, the sqrt_alpha_hat is 0, and the sqrt_one_minus_alpha_hat is 1:
-        #     noised_squence_collumn = 0 * squence_collumn + 1 * noise = noise = noise
-
-        # print("seqence_tensor", seqence_tensor.shape, seqence_tensor)
-        # print("noise", noise.shape, noise)
-        # print("sqrt_alpha_hats", self.sqrt_alpha_hats.shape, self.sqrt_alpha_hats)
-        # print("sqrt_one_minus_alpha_hats", self.sqrt_one_minus_alpha_hats.shape, self.sqrt_one_minus_alpha_hats)
-
-        self.sqrt_alpha_hats = self.time_step_stackings[stacking_level][0]
-        self.sqrt_one_minus_alpha_hats = self.time_step_stackings[stacking_level][1]
-
-        if len(sequence_tensor.shape) == 3:
-            # If the input is a 3D tensor, we need to add a batch dimension
-            self.sqrt_alpha_hats = self.sqrt_alpha_hats.unsqueeze(1)
-            self.sqrt_one_minus_alpha_hats = self.sqrt_one_minus_alpha_hats.unsqueeze(1)
-        
-        # print("AFTER seqence_tensor", seqence_tensor.shape, seqence_tensor)
-        # print("AFTER noise", noise.shape, noise)
-        # print("AFTER sqrt_alpha_hats", self.sqrt_alpha_hats.shape, self.sqrt_alpha_hats)
-        # print("AFTER sqrt_one_minus_alpha_hats", self.sqrt_one_minus_alpha_hats.shape, self.sqrt_one_minus_alpha_hats)
-
-        noised_image = self.sqrt_alpha_hats * sequence_tensor + self.sqrt_one_minus_alpha_hats * noise
-
-        # print("noised_image", noised_image.shape, noised_image)
-        
-        return noised_image
-
-    # noise schedules
-
-    # There are several different noise schedules that can be used.
-    # which one to use is a hyperparameter that can be tuned.
-    # We detach them from the forward diffusion function, so it is easier to switch between them.
-
-    @staticmethod
-    def linear_schedule(beta_min = 0.0001, beta_max = 0.02) -> Callable[[int, int], float]:
-        # This is a simple linear schedule. Noice is added as a uniform increase.
-        # Pros: Simple and works well.
-        # Cons: Can be suboptimal, and to0 simple
-
-        def linear_schedule(t: int, T: int) -> float:
-            return beta_min + (beta_max - beta_min) * (t / T)
-        
-        return (linear_schedule, {"name": "linear_schedule", "beta_min": beta_min, "beta_max": beta_max})
+        return noised_image # , noise
     
-    @staticmethod
-    def quadratic_schedule(beta_min = 0.0001, beta_max = 0.02) -> Callable[[int, int], float]:
-        # This makes the diffusion more 'agressive' (high var) when t is high. Starts slow, then increases rapidly.
-        # Pro: Preserves details early on
-        # Con: High noise at later timesteps
-
-        def quadratic_schedule(t: int, T: int) -> float:
-            return beta_min + (beta_max - beta_min) * (t / T) ** 2
-            # return (t / T) ** 2
-
-        return (quadratic_schedule, {"name": "quadratic_schedule", "beta_min": beta_min, "beta_max": beta_max})
+    def get_sequence_timesteps(self, current_timestep: torch.Tensor):
+        # Returns a tensor of timesteps for the current stacking level
+        return self.frame_timesteps_stacked[current_timestep.to(dtype=torch.int)]
     
-    @staticmethod
-    def exponential_schedule(beta_min = 0.0001, beta_max = 0.02) -> Callable[[int, int], float]:
-        # 'beta' is the hyperparams of the exponentaial schedual.
-        # Typical beta values are 0.0001 and 0.02, and they are used to control the rate of exponental decay of the variance.
-
-        def exponential_schedule(t: int, T: int) -> float:
-            return beta_min * ((beta_max / beta_min) ** (t / T))
-
-        return (exponential_schedule, {"name": "exponential_schedule", "beta_min": beta_min, "beta_max": beta_max})
+    @property
+    def number_of_timesteps(self) -> int:
+        return self.num_timestep_stackings
     
-    @staticmethod
-    def sigmoid_schedule(k = 10, beta_min = 0.0001, beta_max = 0.02) -> Callable[[int, int], float]:
-        # 'k' is the hyperparam of the sigmoid schedule.
-        # It controls the steepness of the sigmoid function, than inturn controls how fast the variance changes 
-        # at the start, end and middel of the diffusion.
-
-        def sigmoid_schedule(t: int, T: int):
-            return beta_min + (beta_max - beta_min) / (1 + math.exp(-k * (t / T - 0.5)))
-            # return 1 / (1 + math.exp(-k * (t / T - 0.5)))
-
-        return (sigmoid_schedule, {"name": "sigmoid_schedule", "k": k, "beta_min": beta_min, "beta_max": beta_max})
-
-    # Implenents the abstract method from the WnBTrackable ABC class (interface)
+    @property
+    def clean_frame_index(self) -> int:
+        return self.num_clean_frames
+    
     def get_WnB_config_specs(self):
-        # Return the configuration specs needed for Weights & Biases tracking.
-        # This should be a dictionary with keys as the parameter names and values as their types.
         return {
-            "num_of_pre_timestep_frames": self.num_of_pre_timestep_frames,
-            "num_of_timestep_frames": self.num_of_timestep_frames,
-            "num_of_post_timestep_frames": self.num_of_post_timestep_frames,
-            "num_of_timestep_stackings": self.num_of_timestep_stackings,
-            "number_of_diffusion_steps_for_each_frame": self.num_of_timestep_frames * self.num_of_timestep_stackings,
+            "num_clean_frames": self.num_clean_frames,
+            "num_denoise_frames": self.num_denoise_frames,
+            "num_noise_frames": self.num_noise_frames,
+            "num_timestep_stackings": self.num_timestep_stackings,
             **self.noise_schedule_hyper_params,
         }

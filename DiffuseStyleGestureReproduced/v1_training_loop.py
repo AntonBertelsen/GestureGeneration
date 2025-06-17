@@ -278,17 +278,17 @@ def train(
         
         # We calculate the Frechet distance between the generated and true gestures.
         # This is a measure of how similar the distribution of the generated gestures is to the distribution of the true gestures.
-        frechet_distance, _, = v1_evaluation.evaluate_frechet_gesture_distance(
-            model             = model,
-            val_loader        = val_loader,
-            device            = device,
-            evaluation_length = 30,
-            num_samples       = 8192,
-            calculate_raw_frechet_distance = False
-        )
+        # frechet_distance, _, = v1_evaluation.evaluate_frechet_gesture_distance(
+        #     model             = model,
+        #     val_loader        = val_loader,
+        #     device            = device,
+        #     evaluation_length = 30,
+        #     num_samples       = 8192,
+        #     calculate_raw_frechet_distance = False
+        # )
 
         # Log the Frechet distance so we can see how it changes over time.
-        frechet_distance_rec['encoded'].append(frechet_distance)
+        # frechet_distance_rec['encoded'].append(frechet_distance)
 
         # We run the model on the validation set to calculate the validation loss.
         with torch.no_grad():
