@@ -226,14 +226,15 @@ def train(
                 
                 # Log the results to wandb (W&B) if a run is provided.
                 if run is not None:
+                    print("LOGGING TRAINING!!! TO W&B")
                     run.log({
-                        "total_loss": total_loss.item(),
-                        "reconstruction_loss": train_loss_rec['reconstruction_loss'][1][-1],
-                        "encoded_latent_space_loss": train_loss_rec['encoded_latent_space_loss'][1][-1],
-                        "variance_loss": train_loss_rec['variance_loss'][1][-1],
-                        "velocity_loss": train_loss_rec['velocity_loss'][1][-1],
-                        "acceleration_loss": train_loss_rec['acceleration_loss'][1][-1],
-                        "jerk_loss": train_loss_rec['jerk_loss'][1][-1]
+                        "training/total_loss": total_loss.item(),
+                        "training/reconstruction_loss": train_loss_rec['reconstruction_loss'][1][-1],
+                        "training/encoded_latent_space_loss": train_loss_rec['encoded_latent_space_loss'][1][-1],
+                        "training/variance_loss": train_loss_rec['variance_loss'][1][-1],
+                        "training/velocity_loss": train_loss_rec['velocity_loss'][1][-1],
+                        "training/acceleration_loss": train_loss_rec['acceleration_loss'][1][-1],
+                        "training/jerk_loss": train_loss_rec['jerk_loss'][1][-1]
                     }, step = i + epoch * epoch_length)
 
                 if not is_running_on_slurm() and should_visualize_training_progress:
@@ -351,7 +352,7 @@ def train(
     save_model_checkpoint( 
         model                   = model,
         checkpoint_dir          = model_checkpoint_dir,
-        model_name              = current_model_name + "_final",
+        model_name              = current_model_name,
         epoch                   = num_epochs-1,
         hyper_parameters        = hyper_parameters,
         optimizer               = optimizer,
@@ -359,7 +360,8 @@ def train(
         val_loss_rec            = val_loss_rec,
         frechet_distance_rec    = frechet_distance_rec,
         upload                  = upload_model_check_point,
-        run                     = run
+        run                     = run,
+        final                   = True
     )
 
     # Return the trained model
@@ -670,11 +672,15 @@ def save_model_checkpoint(
         val_loss_rec: dict,
         frechet_distance_rec: dict,
         upload: bool = False,
-        run = None
+        run = None,
+        final: bool = False
     ):
     
-    checkpoint_path = f"{checkpoint_dir}/{model_name}/{model_name}_epoch_{epoch + 1}.pth"
-    
+    if not final:
+        checkpoint_path = f"{checkpoint_dir}/{model_name}/{model_name}_epoch_{epoch + 1}.pth"
+    else:
+        checkpoint_path = f"{checkpoint_dir}/{model_name}/{model_name}_final.pth"
+        
     # Ensure the directory exists
     os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
 

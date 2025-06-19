@@ -199,3 +199,12 @@ DiffuseStyleGestureReproduced/bvh_tests/bvh/*
 DiffuseStyleGestureReproduced/v1_models/
 DiffuseStyleGestureReproduced/pose_encoder/models/
 DiffuseStyleGestureReproduced/.wandbkey
+job_output/normal_diff/5894.out
+job_output/normal_diff/5893.out
+job_output/normal_diff/5892.out
+job_output/normal_diff/5820.out
+job_output/normal_diff/5819.out
+.gitignore
+job_output/normal_diff/5817.out
+job_output/normal_diff/5816.out
+job_output/normal_diff/5818.out
