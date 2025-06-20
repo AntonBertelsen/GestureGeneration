@@ -92,6 +92,7 @@ class SlidingDiffusion(Diffusion):
     
     def get_WnB_config_specs(self):
         return {
+            "type": "sliding_diffusion",
             "num_clean_frames": self.num_clean_frames,
             "num_denoise_frames": self.num_denoise_frames,
             "num_noise_frames": self.num_noise_frames,

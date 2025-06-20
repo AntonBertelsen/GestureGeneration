@@ -68,6 +68,7 @@ class NormalDiffusion(Diffusion):
     
     def get_WnB_config_specs(self):
         return {
+            "type": "normal_diffusion",
             "num_timesteps": self.num_timesteps,
             "sequence_length": self.sequence_length,
             **self.noise_schedule_hyper_params,
