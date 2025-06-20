@@ -147,8 +147,8 @@ def train(
     # Note: cudagraphs is only available on CUDA devices, so we check if the device is CUDA.
     # There are other backends available, but cudagraphs is the only one I could get working on Windows.
     # In Andrej Kaparthy's gpt video he uses a different backend.
-    if device.type == 'cuda':
-        model = torch.compile(model)
+    # if device.type == 'cuda':
+    #     model = torch.compile(model)
 
     epoch_length = len(training_loader)
 
@@ -286,22 +286,24 @@ def train(
                 val_loader        = val_loader,
                 device            = device,
                 evaluation_length = 30,
-                num_samples       = 8192,
+                num_samples       = 128,
                 calculate_raw_frechet_distance = False
             )
 
             # Log the Frechet distance so we can see how it changes over time.
             frechet_distance_rec['encoded'].append(frechet_distance)
 
-            run.log({
-                "validation/frechet_distance": frechet_distance_rec['encoded'][-1] if frechet_distance_rec['encoded'] else 0
-            }, step=(epoch+1) * epoch_length)
+            if run is not None:
+                # Log the Frechet distance to wandb (W&B)
+                run.log({
+                    "validation/frechet_distance": frechet_distance_rec['encoded'][-1] if frechet_distance_rec['encoded'] else 0
+                }, step=(epoch+1) * epoch_length)
 
         # We run the model on the validation set to calculate the validation loss.
         with torch.no_grad():
             for val_batch in val_loader:
                 # We are using our own batching mechanism in the dataset to to avoid having to use a collate function.
-                gesture_sequence, _, audio_features, main_agent_id_one_hot = [
+                gesture_sequence, gesture_seed, audio_features, main_agent_id_one_hot = [
                     item.squeeze(0).to(device) for item in val_batch
                 ]
                 

@@ -25,7 +25,7 @@ class NormalDiffusion(Diffusion):
         
         # Precalculate all beta values
         timesteps = torch.arange(0, num_timesteps, device=device).float() / (num_timesteps - 1)
-        self.timestep_matrix = timesteps.unsqueeze(1).expand(1, sequence_length)
+        self.timestep_matrix = timesteps.unsqueeze(1).repeat(1, sequence_length)
         
         self.beta_values = torch.tensor([self.noise_schedule(t, self.num_timesteps) for t in range(self.num_timesteps)], device=device)
         # Alpha is 1 - beta, so here we precalculate all alpha values

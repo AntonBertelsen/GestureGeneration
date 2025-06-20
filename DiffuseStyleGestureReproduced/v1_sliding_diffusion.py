@@ -50,6 +50,9 @@ class SlidingDiffusion(Diffusion):
             sqrt_alpha_hats = torch.sqrt(alpha_hat_values)            
             sqrt_one_minus_alpha_hats = torch.sqrt(1 - alpha_hat_values)
 
+            # Normalize the fame_timesteps to the range [0, 1]
+            frame_timesteps = frame_timesteps.float() / (num_denoise_frames * num_timestep_stackings - 1)
+
             frame_timesteps_list.append(frame_timesteps)  # Add a dimension for the stacking level
             sqrt_alpha_hats_list.append(sqrt_alpha_hats)
             sqrt_one_minus_alpha_hats_list.append(sqrt_one_minus_alpha_hats)
@@ -65,6 +68,10 @@ class SlidingDiffusion(Diffusion):
         
         sqrt_alpha_hats = self.sqrt_alpha_hats_stacked[timestep]
         sqrt_one_minus_alpha_hats = self.sqrt_one_minus_alpha_hats_stacked[timestep]
+
+        # Add an unsqueeze operation to create proper broadcasting dimension
+        sqrt_alpha_hats = sqrt_alpha_hats.unsqueeze(-1)         # [256, 100] -> [256, 100, 1]
+        sqrt_one_minus_alpha_hats = sqrt_one_minus_alpha_hats.unsqueeze(-1)  # [256, 100] -> [256, 100, 1]
 
         # Calculate the noised image
         noised_image = sqrt_alpha_hats * sequence_tensor + sqrt_one_minus_alpha_hats * noise

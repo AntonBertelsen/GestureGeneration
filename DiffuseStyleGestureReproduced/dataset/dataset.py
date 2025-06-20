@@ -119,7 +119,7 @@ class GPUDataset(Dataset):
     """Dataset that keeps data on GPU for maximum performance with vectorized operations"""
     def __init__(self, consolidated_file, seq_length=150, seed_length=0, 
                  batch_size=32, epoch_length=1000, return_audio_frame_index=False,
-                 device=torch.device('cuda'), use_world_pos_gesture_features=False, loading_encoded_data=False):
+                 device=torch.device('cuda'), use_only_world_pos_gesture_features=False, loading_encoded_data=False, include_world_pos_gesture_features=False, include_vel_acc_features=False):
         self.seq_length = seq_length
         self.seed_length = seed_length
         self.batch_size = batch_size
@@ -127,8 +127,10 @@ class GPUDataset(Dataset):
         self.chunk_size = seq_length + seed_length
         self.return_audio_frame_index = return_audio_frame_index
         self.device = device
-        self.use_world_pos_gesture_features = use_world_pos_gesture_features
+        self.use_only_world_pos_gesture_features = use_only_world_pos_gesture_features
         self.loading_encoded_data = loading_encoded_data
+        self.include_world_pos_gesture_features = include_world_pos_gesture_features
+        self.include_vel_acc_features = include_vel_acc_features
         
         print(f"Initializing GPU-resident dataset on {device}")
         
@@ -149,10 +151,12 @@ class GPUDataset(Dataset):
         data = np.load(consolidated_file)
         
         # Convert to torch tensors and move directly to GPU
-        if use_world_pos_gesture_features:
+        if use_only_world_pos_gesture_features:
             self.gestures = torch.from_numpy(data['world_pos_gestures']).half().to(device)
         else:
             self.gestures = torch.from_numpy(data['gestures']).half().to(device)
+            if self.include_world_pos_gesture_features:
+                self.world_pos_gestures = torch.from_numpy(data['world_pos_gestures']).half().to(device)
 
         self.audio = torch.from_numpy(data['audio']).half().to(device)
         self.speakers = torch.from_numpy(data['speakers']).half().to(device)
@@ -255,13 +259,33 @@ class GPUDataset(Dataset):
         
         if not self.loading_encoded_data:
             # Apply z-score normalization
-            if self.use_world_pos_gesture_features:
+            if self.use_only_world_pos_gesture_features:
                 gesture_batch = self.skeleton.normalize_world_positions(gesture_batch)
                 seed_batch = self.skeleton.normalize_world_positions(seed_batch)
             else:
                 gesture_batch = self.skeleton.normalize_poses(gesture_batch)
                 seed_batch = self.skeleton.normalize_poses(seed_batch)
         
+        # If using world position features, concatenate them together to include both
+        if self.include_world_pos_gesture_features:
+            world_pos_gesture_batch = self.world_pos_gestures[gesture_indices]
+            world_pos_seed_batch = self.world_pos_gestures[seed_indices]
+            if not self.loading_encoded_data:
+                world_pos_gesture_batch = self.skeleton.normalize_world_positions(world_pos_gesture_batch)
+                world_pos_seed_batch = self.skeleton.normalize_world_positions(world_pos_seed_batch)
+            gesture_batch = torch.cat((gesture_batch, world_pos_gesture_batch), dim=-1)
+            seed_batch = torch.cat((seed_batch, world_pos_seed_batch), dim=-1)
+
+        if self.include_vel_acc_features:
+            gesture_velocity_batch = torch.diff(gesture_batch, dim=1, prepend=gesture_batch[:, :1, :])
+            gesture_acceleration_batch = torch.diff(gesture_velocity_batch, dim=1, prepend=gesture_velocity_batch[:, :1, :])
+
+            seed_velocity_batch = torch.diff(seed_batch, dim=1, prepend=seed_batch[:, :1, :])
+            seed_acceleration_batch = torch.diff(seed_velocity_batch, dim=1, prepend=seed_velocity_batch[:, :1, :])
+
+            gesture_batch = torch.cat((gesture_batch, gesture_velocity_batch, gesture_acceleration_batch), dim=-1)
+            seed_batch = torch.cat((seed_batch, seed_velocity_batch, seed_acceleration_batch), dim=-1)
+
         if self.return_audio_frame_index:
             # Return the start frame index for the audio snippet
             audio_frame_indices = start_points + self.seed_length
