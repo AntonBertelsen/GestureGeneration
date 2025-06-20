@@ -16,7 +16,7 @@ import utils.utils as utils
 
 class ContinuousMotionModel(nn.Module, WnBTrackable):
     def __init__(self, 
-                n_gesture_length: int,                      # Length of the sequence snippets to generate. We geneate in autoregressive manner, where we are constantly generating small chunks continously
+                gesture_length: int,                        # Length of the sequence snippets to generate.
                 audio_features_per_frame: int,              # Number of audio features per frame. This is a mixture of prosodic features, onsets, wavlm, etc.
                 pose_features_per_frame: int,               # Number of pose features per frame. These are the rotations / translations of the bones in the character skeleton. We may not pay attention to every channel for every bone, or every bone. 
                 number_of_styles: int,                      # Number of unique styles. In this context this is the number of speakers, since we treat each speaker as a style 
@@ -25,25 +25,29 @@ class ContinuousMotionModel(nn.Module, WnBTrackable):
                 number_of_attention_heads: int = 8,         # Number of attention heads to use in the local attention layer. The original paper uses 8, but we can experiment with this.
                 pose_encoder: PoseEncoder = None,           # Autoencoder model to use for encoding the gesture sequence to a lower dimensional space. This is used to reduce the dimensionality of the input sequence.
                 predict_full_duration: bool = True,         # If True, the model will predict the full duration of the gesture sequence. If False, it will predict only the noised frames at the end of the sequence.
+                seed_length: int = 0,                       # If not 0 we condition the generation on a seed gesture sequence. This is to allow for continous generation of sequences, where we can use the last generated sequence as a seed for the next sequence.
+                reinject_seed_style_t: bool = False,         # If True, we will re-inject the seed style and timestep at every frame. This is to allow for more stable generation of sequences.
                 debugger: Debugger = Debugger(False),       # Debugger to use for debugging the model. This is used to capture and display information about the model during training and inference.
                 device = utils.get_device()
             ):
         super().__init__()
 
         self.hyperparameter_dict_to_WnB_tracking = {
-            "n_gesture_length": n_gesture_length,
+            "gesture_length": gesture_length,
             "audio_features_per_frame": audio_features_per_frame,
             "pose_features_per_frame": pose_features_per_frame,
             "number_of_styles": number_of_styles,
             "diffusion": diffusion.get_WnB_config_specs(),
             "condition_mask_probabilty": condition_mask_probabilty,
             "number_of_attention_heads": number_of_attention_heads,
-            "predict_full_duration": predict_full_duration,
             "pose_encoder": pose_encoder.get_WnB_config_specs() if pose_encoder is not None else None,
+            "predict_full_duration": predict_full_duration,
+            "seed_length": seed_length,
+            "reinject_seed_style_t": reinject_seed_style_t,
             "device": device,
         }
 
-        self.n_gesture_length = n_gesture_length
+        self.gesture_length = gesture_length
         self.audio_features_per_frame = audio_features_per_frame
         self.pose_features_per_frame = pose_features_per_frame
         self.number_of_styles = number_of_styles
@@ -52,6 +56,8 @@ class ContinuousMotionModel(nn.Module, WnBTrackable):
         self.number_of_attention_heads = number_of_attention_heads
         self.pose_encoder = pose_encoder
         self.predict_full_duration = predict_full_duration
+        self.seed_length = seed_length
+        self.reinject_seed_style_t = reinject_seed_style_t
         self.debugger = debugger
         self.device = device
         self.pose_features_per_frame = pose_features_per_frame
@@ -66,9 +72,9 @@ class ContinuousMotionModel(nn.Module, WnBTrackable):
 
         # Maybe this serves as a learned position encoding as described in Vaswani et al? It's from the original paper, but we are not sure why it is needed.
         self.timestep_mlp = nn.Sequential(
-            nn.Linear(1, 32),
+            nn.Linear(1, 128),
             nn.SiLU(),
-            nn.Linear(32, 64)
+            nn.Linear(128, 256)
         )
 
         # Style linear layer - for dimensionality expansion from a one-hot encoded (number_of_styles) to (64) shape
@@ -78,7 +84,12 @@ class ContinuousMotionModel(nn.Module, WnBTrackable):
         # the model more general, and to make it easier to generalize to new speakers.
         self.style_linear = nn.Linear(
             in_features=number_of_styles, 
-            out_features=64
+            out_features = 64
+        )
+
+        self.seed_linear = nn.Linear(
+            in_features=pose_features_per_frame * seed_length,
+            out_features=192
         )
         
         # Audio feature linear layer per frame - for dimensionality reduction
@@ -87,23 +98,23 @@ class ContinuousMotionModel(nn.Module, WnBTrackable):
             out_features=64
         )
 
-        # Noisy gesture sequence linear layer - for dimensionality reduction (TODO: Actually dimensionality expansion if we use pose encoder)
+        # Noisy gesture sequence linear layer
         self.noisy_gesture_linear = nn.Linear(
             in_features=pose_features_per_frame, 
             out_features=256
         )
 
         self.pre_local_attention_linear = nn.Linear(
-            in_features=64 + 64 + 256, 
+            in_features=256 + 64 + 256, 
             out_features=256
         )
 
         # Local Attention. The idea here is to pay attention only to local features.
         self.multi_head_local_attention = transformer.LocalMHA(
-            dim = 256,
+            dim = 256 if not reinject_seed_style_t else 512,
             window_size=16, # Was 15 in the original paper
             dim_head=32,
-            heads=8,
+            heads=number_of_attention_heads,
             dropout = 0.1,
             causal=True, # TODO: remember that this is something we can experiment with
             look_backward = 1,
@@ -130,12 +141,12 @@ class ContinuousMotionModel(nn.Module, WnBTrackable):
     def display_debug_info(self, display_debug_info: bool, filter_keys: Union[str, list[str]]):
         self.debugger = Debugger(on=display_debug_info, keys=filter_keys)
 
-
     def forward(self, 
                 timestep,
                 one_hot_style, 
                 audio_features, 
-                noisy_gesture_sequence):
+                noisy_gesture_sequence,
+                seed_gesture_sequence=None):
 
         self.debugger.capture([("one_hot_style", one_hot_style),("audio_features", audio_features),("noisy_gesture_sequence", noisy_gesture_sequence)],[Show.MAX_MIN,], keys=["input_analysis"])
         
@@ -145,7 +156,7 @@ class ContinuousMotionModel(nn.Module, WnBTrackable):
         bs, frames = sequence_timesteps.shape
         t_after_timestep_mlp = self.timestep_mlp(sequence_timesteps.reshape(-1, 1)).reshape(bs, frames, -1)
         self.debugger.capture(("t_after_timestep_mlp", t_after_timestep_mlp), [Show.MAX_MIN, Show.IMAGE, Show.SHAPE], keys=["t_after_timestep_mlp"])
-
+        
         # Apply a linear layer to get a tensor of shape (bs, 1, 64)
         style = self.style_linear(one_hot_style)
         self.debugger.capture(("style AFTER style_linear", style), [Show.MAX_MIN, Show.IMAGE, Show.SHAPE], keys="style")
@@ -156,12 +167,23 @@ class ContinuousMotionModel(nn.Module, WnBTrackable):
             style *= style_mask
             self.debugger.capture(("style AFTER style_mask", style), [Show.MAX_MIN, Show.IMAGE], keys="style")
 
+        # If we are using a seed length, we will condition the generation on a seed gesture
+        if self.seed_length > 0:
+            seed = self.seed_linear(seed_gesture_sequence.reshape(bs, -1))
+            if self.training:
+                seed_mask = torch.bernoulli(torch.full((bs, self.seed_length), 1 - self.condition_mask_probabilty)).unsqueeze(-1)
+                seed *= seed_mask
+        else:
+            seed = torch.zeros((bs, 192), device=self.device)
+
+        style_plus_seed = style + seed  # (bs, 64) + (bs, 192) -> (bs, 256)
+            
         # Reshape the style to be of shape (bs, sequence_length, 64) for broadcasting
-        style = style.unsqueeze(1).repeat(1, frames, 1)  # (bs, N, 64)
+        style_plus_seed = style_plus_seed.unsqueeze(1).expand(1, frames, 1)  # (bs, N, 256)
 
         # Combine the style as timestep tensors using element vise addition
-        style_with_t = t_after_timestep_mlp + style  # (bs, 1, 64) # TODO: Is this a good idea? Should we not maintain a fully separate timestep embedding to help the new diffusion approach?
-        self.debugger.capture([("style_with_t", style_with_t)], [Show.MAX_MIN, Show.IMAGE], keys=["style"])
+        style_seed_with_t = t_after_timestep_mlp + style_plus_seed
+        self.debugger.capture([("style_with_t", style_seed_with_t)], [Show.MAX_MIN, Show.IMAGE], keys=["style"])
 
         # 1.4 - Prepare the audio features tensor
         #       Apply a linear layer to get a tensor of shape (bs, N, 64) - every column is the features for that frame
@@ -169,25 +191,19 @@ class ContinuousMotionModel(nn.Module, WnBTrackable):
         audio_features = self.audio_linear(audio_features)
         self.debugger.capture(("audio_features AFTER audio_linear", audio_features), [Show.MAX_MIN, Show.IMAGE], keys="audio_features")
         
-        # 1.5 - Prepare the noisy gesture sequence tensor (bs, N, 1141)
+        # 1.5 - Prepare the noisy gesture sequence tensor
         #       Apply a linear layer to get a tensor of shape (bs, N, 256) - every column is the features for that frame
         #       The linear layer is applied per frame
         noisy_gesture_sequence = self.noisy_gesture_linear(noisy_gesture_sequence)
         self.debugger.capture(("noisy_gesture_sequence AFTER noisy_gesture_linear", noisy_gesture_sequence), [Show.MAX_MIN, Show.IMAGE], keys="noisy_gesture_sequence")
 
         # 2 - Combine input tensors to get the input tensor for the model
-
-        # 2.2 - Concatenate the audio features tensor and Noisy gesture sequence tensor
-        #       To get a tensor of shape (320, N)
-        audio_noisy_gesture = torch.cat([audio_features, noisy_gesture_sequence], dim=-1)  # (320, N)
-        self.debugger.capture(("audio_noisy_gesture", audio_noisy_gesture), [Show.MAX_MIN, Show.IMAGE], keys="audio_noisy_gesture")
-
     
         # 2.4 - Concatenate the seed_style_t and the audio_features_noisy_gesture_sequence tensor
         #       To get a tensor of shape (576, N) (Could be nicer)
         #       This gives us the 'input' for the model
 
-        full_data_tensor = torch.cat([style_with_t, audio_noisy_gesture], dim=-1)
+        full_data_tensor = torch.cat([style_seed_with_t, audio_features, noisy_gesture_sequence], dim=-1)
         self.debugger.capture(("The final combied tensor of all the data", full_data_tensor), [Show.MAX_MIN, Show.IMAGE], keys="full_data_tensor")
 
         # 2.5 - Srink and mix the full_data_tensor to get a more compressed, optimsied tensor for the attention layers
@@ -210,6 +226,16 @@ class ContinuousMotionModel(nn.Module, WnBTrackable):
         local_attention_output = self.multi_head_local_attention(input)
         self.debugger.capture(("local_attention_output", local_attention_output), [Show.MAX_MIN, Show.IMAGE], keys="local_attention_output")
         
+        if self.reinject_seed_style_t:
+            # If we are re-injecting the seed style and timestep at every frame, we will concatenate the seed_style_t with the local attention output
+            # This is done to allow the model to pay attention to the seed style and timestep at every frame.
+            # We concatenate along the feature dimension, so the output tensor will be of shape (bs, N, 512)
+
+            # Note that this is different from the original implementation, where they concatenate the seed style and timestep at the beginning of the sequence.
+            # We cannot do this if we want to support sliding diffusion since each frame has a different timestep.
+            local_attention_output = torch.cat([local_attention_output, style_seed_with_t], dim=-1)
+            self.debugger.capture(("local_attention_output after concatenation with style_seed_with_t", local_attention_output), [Show.MAX_MIN, Show.IMAGE], keys="local_attention_output_after_concat")
+
         # 3.3 - Apply a self attention layer to the tensor of shape (256, N+1)
         #       We now apply full self attention. The paper and illustration makes it look as though we are applying a single
         #       self attention layer, but the code seems to actually apply a full 8 layer encoder transformer model.
@@ -234,7 +260,7 @@ class ContinuousMotionModel(nn.Module, WnBTrackable):
         # 4 - Return the output of the liniear layer
         return output_tensor
 
-    def generate(self, gesture_sequence, audio_features, main_agent_id_one_hot, gesture_sequence_is_encoded: bool = False):
+    def generate(self, gesture_sequence, audio_features, main_agent_id_one_hot, gesture_Seed = None, gesture_sequence_is_encoded: bool = False):
         with autocast(device_type=self.device.type, dtype=torch.bfloat16):
 
             # If the autoencoder model is provided, we use it to encode the gesture sequence to a lower dimensional latent space
@@ -250,7 +276,8 @@ class ContinuousMotionModel(nn.Module, WnBTrackable):
                 timestep                    = per_sequence_timestep,
                 one_hot_style               = main_agent_id_one_hot,
                 audio_features              = audio_features, 
-                noisy_gesture_sequence      = noisy_gesture_sequence
+                noisy_gesture_sequence      = noisy_gesture_sequence,
+                seed_gesture_sequence       = gesture_Seed
             )
             
             if not self.predict_full_duration:
@@ -262,7 +289,7 @@ class ContinuousMotionModel(nn.Module, WnBTrackable):
 
             return output, encoded_gesture_sequence, encoded_output, noisy_gesture_sequence
 
-    def inference(self, starting_point, audio_features, main_agent_id_one_hot):
+    def inference(self, starting_point, audio_features, main_agent_id_one_hot, gesture_Seed = None):
         with autocast(device_type=self.device.type, dtype=torch.bfloat16):
             # Shift the gesture_sequence by one frame
             shifted_gesture_sequence = torch.roll(starting_point, shifts=-1, dims=1)
@@ -279,7 +306,8 @@ class ContinuousMotionModel(nn.Module, WnBTrackable):
                     time_step_stacking_level    = stacking_level,
                     one_hot_style               = main_agent_id_one_hot,
                     audio_features              = audio_features, 
-                    noisy_gesture_sequence      = noisy_gesture_sequence
+                    noisy_gesture_sequence      = noisy_gesture_sequence,
+                    seed_gesture_sequence       = gesture_Seed
                 )
 
                 if not self.predict_full_duration:
@@ -341,7 +369,7 @@ class ContinuousMotionModel(nn.Module, WnBTrackable):
             # Create normal diffusion model
             diffusion = NormalDiffusion(
                 num_timesteps               = config['diffusion']['num_timesteps'],
-                sequence_length             = config['n_gesture_length'],
+                sequence_length             = config['gesture_length'],
                 noise_schedule              = noise_schedule,
                 device                      = device
             )
@@ -369,15 +397,17 @@ class ContinuousMotionModel(nn.Module, WnBTrackable):
         
         # Create the main model
         model = ContinuousMotionModel(
-            n_gesture_length            = config['n_gesture_length'],
+            gesture_length              = config['gesture_length'],
             audio_features_per_frame    = config['audio_features_per_frame'],
             pose_features_per_frame     = config['pose_features_per_frame'],
             number_of_styles            = config['number_of_styles'],
             diffusion                   = diffusion,
             condition_mask_probabilty   = config['condition_mask_probabilty'],
             number_of_attention_heads   = config['number_of_attention_heads'],
-            predict_full_duration       = config['predict_full_duration'],
             pose_encoder                = pose_encoder,
+            predict_full_duration       = config['predict_full_duration'],
+            seed_length                 = config['seed_length'],
+            reinject_seed_style_t       = config['reinject_seed_style_t'],
             device                      = device
         ).to(device)
 

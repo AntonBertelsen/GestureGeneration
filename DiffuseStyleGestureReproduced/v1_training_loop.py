@@ -173,7 +173,7 @@ def train(
             # We are using our own batching mechanism in the dataset to to avoid having to use a collate function.
             # As such, each item contains a full batch, but we need to handle the extra dimension 
             # from batch_size=1 from the dataloader.
-            gesture_sequence, _, audio_features, main_agent_id_one_hot = [
+            gesture_sequence, gesture_seed, audio_features, main_agent_id_one_hot = [
                 item.squeeze(0).to(device) for item in batch_data
             ]
 
@@ -181,6 +181,7 @@ def train(
                 gesture_sequence            = gesture_sequence,
                 audio_features              = audio_features,
                 main_agent_id_one_hot       = main_agent_id_one_hot,
+                gesture_seed                = gesture_seed,
                 gesture_sequence_is_encoded = training_loader.dataset.loading_encoded_data
             )
 
@@ -226,7 +227,6 @@ def train(
                 
                 # Log the results to wandb (W&B) if a run is provided.
                 if run is not None:
-                    print("LOGGING TRAINING!!! TO W&B")
                     run.log({
                         "training/total_loss": total_loss.item(),
                         "training/reconstruction_loss": train_loss_rec['reconstruction_loss'][1][-1],
@@ -277,19 +277,25 @@ def train(
         # At the end of the epoch, we evaluate the model on the validation set.
         model.eval()
         
-        # We calculate the Frechet distance between the generated and true gestures.
-        # This is a measure of how similar the distribution of the generated gestures is to the distribution of the true gestures.
-        # frechet_distance, _, = v1_evaluation.evaluate_frechet_gesture_distance(
-        #     model             = model,
-        #     val_loader        = val_loader,
-        #     device            = device,
-        #     evaluation_length = 30,
-        #     num_samples       = 8192,
-        #     calculate_raw_frechet_distance = False
-        # )
+        if epoch % 20 == 0:
 
-        # Log the Frechet distance so we can see how it changes over time.
-        # frechet_distance_rec['encoded'].append(frechet_distance)
+            # We calculate the Frechet distance between the generated and true gestures.
+            # This is a measure of how similar the distribution of the generated gestures is to the distribution of the true gestures.
+            frechet_distance, _, = v1_evaluation.evaluate_frechet_gesture_distance(
+                model             = model,
+                val_loader        = val_loader,
+                device            = device,
+                evaluation_length = 30,
+                num_samples       = 8192,
+                calculate_raw_frechet_distance = False
+            )
+
+            # Log the Frechet distance so we can see how it changes over time.
+            frechet_distance_rec['encoded'].append(frechet_distance)
+
+            run.log({
+                "validation/frechet_distance": frechet_distance_rec['encoded'][-1] if frechet_distance_rec['encoded'] else 0
+            }, step=(epoch+1) * epoch_length)
 
         # We run the model on the validation set to calculate the validation loss.
         with torch.no_grad():
@@ -303,6 +309,7 @@ def train(
                     gesture_sequence            = gesture_sequence,
                     audio_features              = audio_features,
                     main_agent_id_one_hot       = main_agent_id_one_hot,
+                    gesture_seed                = gesture_seed,
                     gesture_sequence_is_encoded = val_loader.dataset.loading_encoded_data
                 )
 
@@ -332,7 +339,6 @@ def train(
         # Log the validation losses and frechet distance to wandb at the end of each epoch
         if run is not None:
             # Log all validation loss components
-            print("LOGGING VALUDATION!!! TO W&B")
             run.log({
                 "validation/total_loss": val_loss_rec['loss'][1][-1] if val_loss_rec['loss'][1] else 0,
                 "validation/reconstruction_loss": val_loss_rec['reconstruction_loss'][1][-1] if val_loss_rec['reconstruction_loss'][1] else 0,
@@ -340,8 +346,7 @@ def train(
                 "validation/variance_loss": val_loss_rec['variance_loss'][1][-1] if val_loss_rec['variance_loss'][1] else 0,
                 "validation/velocity_loss": val_loss_rec['velocity_loss'][1][-1] if val_loss_rec['velocity_loss'][1] else 0,
                 "validation/acceleration_loss": val_loss_rec['acceleration_loss'][1][-1] if val_loss_rec['acceleration_loss'][1] else 0,
-                "validation/jerk_loss": val_loss_rec['jerk_loss'][1][-1] if val_loss_rec['jerk_loss'][1] else 0,
-                "validation/frechet_distance": frechet_distance_rec['encoded'][-1] if frechet_distance_rec['encoded'] else 0,
+                "validation/jerk_loss": val_loss_rec['jerk_loss'][1][-1] if val_loss_rec['jerk_loss'][1] else 0
             }, step=(epoch+1) * epoch_length)
 
     # close the wandb (W&B) run
