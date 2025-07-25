@@ -39,9 +39,13 @@ def train(
         visualize_step: int = 200, # How often to print profiling stats
         continue_from_checkpoint: str = None, # Path to a checkpoint to continue training from. If provided, the model will be loaded from this checkpoint and training will continue from there.
         should_visualize_training_progress = True, # Whether to display the training progress in a Jupyter notebook
+        num_fgd_samples = 8192, # Number of samples to use for the Frechet distance calculation
     ):
 
-    current_model_name = f"{experiment_collection_name}_{time.strftime('%Y-%m-%d_%H-%M-%S')}"
+    if run is not None:
+        current_model_name = f"{run.name}__{run.id}"
+    else:
+        current_model_name = f"{experiment_collection_name}_{time.strftime('%Y-%m-%d_%H-%M-%S')}"
 
     # dictionaries to keep track of the losses during training and validation so we can plot them later.
     # The first element of the tuple is all losses, the second element is the averaged loss over the last visualize_step.
@@ -257,7 +261,7 @@ def train(
         # End of epoch
         ########################################################################
 
-        if epoch % 10 == 0:
+        if epoch % 100 == 0:
             save_model_checkpoint(
                 model                   = model,
                 checkpoint_dir          = model_checkpoint_dir,
@@ -277,18 +281,27 @@ def train(
         # At the end of the epoch, we evaluate the model on the validation set.
         model.eval()
         
-        if epoch % 20 == 0:
+        if epoch % 100 == 0:
 
-            # We calculate the Frechet distance between the generated and true gestures.
-            # This is a measure of how similar the distribution of the generated gestures is to the distribution of the true gestures.
-            frechet_distance, _, = v1_evaluation.evaluate_frechet_gesture_distance(
-                model             = model,
-                val_loader        = val_loader,
-                device            = device,
-                evaluation_length = 30,
-                num_samples       = 128,
-                calculate_raw_frechet_distance = False
-            )
+
+            # Because frechet distance is super noisy we calculate it many times and average to get a much more stable number.
+            calculated_frechet_distances = []
+
+            for i in range(100):
+                # We calculate the Frechet distance between the generated and true gestures.
+                # This is a measure of how similar the distribution of the generated gestures is to the distribution of the true gestures.
+                frechet_distance, _, = v1_evaluation.evaluate_frechet_gesture_distance(
+                    model             = model,
+                    val_loader        = val_loader,
+                    device            = device,
+                    evaluation_length = 30,
+                    num_samples       = num_fgd_samples,
+                    calculate_raw_frechet_distance = False
+                )
+
+                calculated_frechet_distances.append(frechet_distance)
+
+            frechet_distance = np.mean(calculated_frechet_distances)
 
             # Log the Frechet distance so we can see how it changes over time.
             frechet_distance_rec['encoded'].append(frechet_distance)
@@ -350,6 +363,27 @@ def train(
                 "validation/acceleration_loss": val_loss_rec['acceleration_loss'][1][-1] if val_loss_rec['acceleration_loss'][1] else 0,
                 "validation/jerk_loss": val_loss_rec['jerk_loss'][1][-1] if val_loss_rec['jerk_loss'][1] else 0
             }, step=(epoch+1) * epoch_length)
+
+            
+            # run.summary({
+            #     "training/total_loss": train_loss_rec['loss'][1][-1] if train_loss_rec['loss'][1] else 0,
+            #     "training/reconstruction_loss": train_loss_rec['reconstruction_loss'][1][-1] if train_loss_rec['reconstruction_loss'][1] else 0,
+            #     "training/encoded_latent_space_loss": train_loss_rec['encoded_latent_space_loss'][1][-1] if train_loss_rec['encoded_latent_space_loss'][1] else 0,
+            #     "training/variance_loss": train_loss_rec['variance_loss'][1][-1] if train_loss_rec['variance_loss'][1] else 0,
+            #     "training/velocity_loss": train_loss_rec['velocity_loss'][1][-1] if train_loss_rec['velocity_loss'][1] else 0,
+            #     "training/acceleration_loss": train_loss_rec['acceleration_loss'][1][-1] if train_loss_rec['acceleration_loss'][1] else 0,
+            #     "training/jerk_loss": train_loss_rec['jerk_loss'][1][-1] if train_loss_rec['jerk_loss'][1] else 0,
+
+            #     "validation/total_loss": val_loss_rec['loss'][1][-1] if val_loss_rec['loss'][1] else 0,
+            #     "validation/reconstruction_loss": val_loss_rec['reconstruction_loss'][1][-1] if val_loss_rec['reconstruction_loss'][1] else 0,
+            #     "validation/encoded_latent_space_loss": val_loss_rec['encoded_latent_space_loss'][1][-1] if val_loss_rec['encoded_latent_space_loss'][1] else 0,
+            #     "validation/variance_loss": val_loss_rec['variance_loss'][1][-1] if val_loss_rec['variance_loss'][1] else 0,
+            #     "validation/velocity_loss": val_loss_rec['velocity_loss'][1][-1] if val_loss_rec['velocity_loss'][1] else 0,
+            #     "validation/acceleration_loss": val_loss_rec['acceleration_loss'][1][-1] if val_loss_rec['acceleration_loss'][1] else 0,
+            #     "validation/jerk_loss": val_loss_rec['jerk_loss'][1][-1] if val_loss_rec['jerk_loss'][1] else 0,
+
+            #     "validation/frechet_distance": frechet_distance_rec['encoded'][-1] if frechet_distance_rec['encoded'] else 0,
+            # }, step=(epoch+1) * epoch_length)
 
     # close the wandb (W&B) run
     if run is not None: 

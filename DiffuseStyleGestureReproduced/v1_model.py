@@ -26,9 +26,10 @@ class ContinuousMotionModel(nn.Module, WnBTrackable):
                 pose_encoder: PoseEncoder = None,           # Autoencoder model to use for encoding the gesture sequence to a lower dimensional space. This is used to reduce the dimensionality of the input sequence.
                 predict_full_duration: bool = True,         # If True, the model will predict the full duration of the gesture sequence. If False, it will predict only the noised frames at the end of the sequence.
                 seed_length: int = 0,                       # If not 0 we condition the generation on a seed gesture sequence. This is to allow for continous generation of sequences, where we can use the last generated sequence as a seed for the next sequence.
-                reinject_seed_style_t: bool = False,         # If True, we will re-inject the seed style and timestep at every frame. This is to allow for more stable generation of sequences.
+                reinject_seed_style_t: bool = False,        # If True, we will re-inject the seed style and timestep at every frame. This is to allow for more stable generation of sequences.
                 debugger: Debugger = Debugger(False),       # Debugger to use for debugging the model. This is used to capture and display information about the model during training and inference.
-                device = utils.get_device()
+                device = utils.get_device(),
+                num_transformer_layers = 6,                     # Number of layers in the transformer encoder. The original paper uses 6, but we can experiment with this.
             ):
         super().__init__()
 
@@ -45,6 +46,7 @@ class ContinuousMotionModel(nn.Module, WnBTrackable):
             "seed_length": seed_length,
             "reinject_seed_style_t": reinject_seed_style_t,
             "device": device,
+            "num_transformer_layers": num_transformer_layers
         }
 
         self.gesture_length = gesture_length
@@ -61,6 +63,8 @@ class ContinuousMotionModel(nn.Module, WnBTrackable):
         self.debugger = debugger
         self.device = device
         self.pose_features_per_frame = pose_features_per_frame
+        self.num_transformer_layers = num_transformer_layers
+
 
         # If a pose encoder model is provided, we will use it to encode the gesture sequence before passing it to the main model.
         # If the pose encoder model is not provided, we will simply use the gesture sequence as is.
@@ -140,7 +144,7 @@ class ContinuousMotionModel(nn.Module, WnBTrackable):
         
         self.transformer_encoder = nn.TransformerEncoder(
             encoder_layer, 
-            num_layers=6
+            num_layers=num_transformer_layers,
         )
 
         # Final transformation, creating the output
@@ -162,6 +166,12 @@ class ContinuousMotionModel(nn.Module, WnBTrackable):
         self.debugger.capture([("one_hot_style", one_hot_style),("audio_features", audio_features),("noisy_gesture_sequence", noisy_gesture_sequence)],[Show.MAX_MIN,], keys=["input_analysis"])
         
         # Prepare the diffusion time steps t
+        # Get the sequence of timesteps values for the given timestep from the diffusion model (the noise scheduler).
+        # When the model is trained with 'standard' diffusion, the timestep seqnece vector is just is a single value repeated, as pr the original papers implementation. 
+        # But when it is trained with sliding diffusion, the timestep is a sequence of values, and the 'timestep' input is interpreted as the 'stacking level'.
+        # A sequence of timesteps is used to allow the model to pay attention to the current timestep, for each of the 'frame' coulunm vectores, 
+        # as each frame has a different timestep or noise levels. 
+        # The 
         sequence_timesteps = self.diffusion.get_sequence_timesteps(timestep)
 
         bs, frames = sequence_timesteps.shape
@@ -422,6 +432,7 @@ class ContinuousMotionModel(nn.Module, WnBTrackable):
             predict_full_duration       = config['predict_full_duration'],
             seed_length                 = config['seed_length'],
             reinject_seed_style_t       = config['reinject_seed_style_t'],
+            num_transformer_layers      = config['num_transformer_layers'],
             device                      = device
         ).to(device)
 

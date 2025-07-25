@@ -1,6 +1,17 @@
 import torch
 import os
 import glob
+import numpy as np
+import random
+
+def set_seed(seed):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)  # if using GPU
+    # torch.backends.cudnn.deterministic = True
+    # torch.backends.cudnn.benchmark = False
+
 
 def convert_6d_to_matrix(rot_6d_batch: torch.Tensor) -> torch.Tensor:
     """Convert 6D rotation representation to rotation matrices."""

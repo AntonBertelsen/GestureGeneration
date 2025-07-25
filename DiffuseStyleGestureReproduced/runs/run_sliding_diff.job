@@ -1,0 +1,28 @@
+#!/bin/bash
+
+#SBATCH --job-name=42_sliding_diff                                 # Name of the job
+#SBATCH --output=output/no_poseencoder_sliding_diff/%j.out         # Output file (%j is the job ID)
+#SBATCH --cpus-per-task=1                                          # Number of CPU cores requested
+#SBATCH --gres=gpu:h100:1                                          # Request 1 NVIDIA A100 GPU
+#SBATCH --time=23:59:59                                            # Maximum runtime (12 hours)
+#SBATCH --mem=32G                                                  # Amount of memory requested
+
+echo "==== Job info ===="
+echo "Running on: $(hostname)"
+echo "Job ID: $SLURM_JOB_ID"
+echo "Allocated GPUs:"
+nvidia-smi
+echo "--------------------"
+
+source activate sd
+
+echo "==== Python version and packages ===="
+which python
+python --version
+python -c "import torch; print('Torch version:', torch.__version__)"
+
+echo "==== Starting training script ===="
+
+cd ..
+
+python -m runs.run_training_sliding_diffusion_no_poseencoder

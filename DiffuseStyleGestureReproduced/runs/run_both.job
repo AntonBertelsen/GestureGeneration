@@ -1,0 +1,30 @@
+#!/bin/bash
+
+#SBATCH --job-name=normal_vs_sliding_diff                           # Name of the job
+#SBATCH --output=output/sliding_vs_normal_diff/%j.out               # Output file (%j is the job ID)
+#SBATCH --cpus-per-task=1                                           # Number of CPU cores requested
+#SBATCH --gres=gpu                                                  # Request 1 NVIDIA A100 GPU
+#SBATCH --time=3-00:00:00                                           # Maximum runtime (12 hours)
+#SBATCH --mem=32G                                                   # Amount of memory requested
+#SBATCH --partition=acltr
+
+echo "==== Job info ===="
+echo "Running on: $(hostname)"
+echo "Job ID: $SLURM_JOB_ID"
+echo "Allocated GPUs:"
+nvidia-smi
+echo "--------------------"
+
+source activate sd
+
+echo "==== Python version and packages ===="
+which python
+python --version
+python -c "import torch; print('Torch version:', torch.__version__)"
+
+echo "==== Starting training script ===="
+
+cd ..
+
+#python -m runs.run_for_both_normal_and_sliding_diffusion_no_poseencoder --model_type="sliding" --seed=6 --entity="pefu-it-university-of-copenhagen" --project="sliding_vs_normal_20_50_vs_70" 
+python -m runs.run_for_both_normal_and_sliding_diffusion_no_poseencoder --model_type="normal"  --seed=6 --entity="pefu-it-university-of-copenhagen" --project="sliding_vs_normal_20_50_vs_70" 

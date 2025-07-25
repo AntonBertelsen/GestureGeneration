@@ -1,0 +1,34 @@
+#!/bin/bash
+
+#SBATCH --job-name=HyperSweep_1_attention_batch_size_lr                     # Name of the job
+#SBATCH --output=job_output_hyper_sweeps/HyperSweep_1_attention_batch_size_lr/%j.out     # Output file (%j is the job ID)
+#SBATCH --cpus-per-task=1                                                   # Number of CPU cores requested
+#SBATCH --gpus=1                                                            # Request 1 NVIDIA A100 GPU
+#SBATCH --time=02-00:00:00                                                  # Maximum runtime (12 hours)
+#SBATCH --mem=32G                                                           # Amount of memory requested
+#SBATCH --partition=acltr
+
+echo "==== Job info ===="
+echo "Running on: $(hostname)"
+echo "Job ID: $SLURM_JOB_ID"
+echo "Allocated GPUs:"
+nvidia-smi
+echo "--------------------"
+
+source activate sd
+
+echo "==== Python version and packages ===="
+which python
+python --version
+python -c "import torch; print('Torch version:', torch.__version__)"
+
+echo "==== Starting training script ===="
+
+cd DiffuseStyleGestureReproduced
+
+# To get a sweep ID, run the following command:
+# python -m sweeping.create_new_sweep_id
+
+# Then call the sweep script with the sweep ID:
+# !!! INSERT THE SWEEP ID !!!
+python -m sweeping.sweep_sd --sweep_id="48f6pqjc" --entity="pefu-it-university-of-copenhagen" --project="hyperSweep_2_attention_batch_size_lr_sliding_diffusion" 

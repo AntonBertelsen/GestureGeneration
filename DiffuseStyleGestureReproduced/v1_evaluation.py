@@ -36,7 +36,7 @@ def evaluate_frechet_gesture_distance_sliding_diffusion(
         old_valid_starts = val_loader.dataset.valid_starts
 
         old_sequence_length = val_loader.dataset.seq_length
-        val_loader.dataset.seq_length = model.diffusion.num_clean_frames + 2 * model.diffusion.num_denoise_frames + model.diffusion.number_of_timesteps + evaluation_length
+        val_loader.dataset.seq_length = (model.diffusion.num_clean_frames + model.diffusion.num_denoise_frames + model.diffusion.num_noise_frames) + model.diffusion.num_denoise_frames + model.diffusion.num_noise_frames + evaluation_length
         val_loader.dataset.chunk_size = val_loader.dataset.seq_length + val_loader.dataset.seed_length
         val_loader.dataset._create_offset_tensors()
         val_loader.dataset.valid_starts = val_loader.dataset._find_valid_starting_points()
@@ -48,9 +48,9 @@ def evaluate_frechet_gesture_distance_sliding_diffusion(
 
         with autocast(device_type=device.type, dtype=torch.bfloat16):
             # We load all the data we need. even when we have generated everything. 
-            # That is we need the starting point (The "seed"), which gives us the starting clean gesture from which we continue our generation. (num_presteps)
+            # That is we need the starting point (The "seed"), which gives us the starting clean gesture from which we continue our generation. (num_clean_frames)
             # We also need enough data to move past the the noising area (num_denoise_frames) + the initial noising area (num_denoise_frames)
-            # We also need enough data to have n_frames of data generated when we are done. (n_frames)
+            # We also need enough data to have n_frames of data generated when we are done. (evaluation_length)
             # i.e. sequence length retrieved by val_loader should be num_clean_frames + 2 * num_denoise_frames + num_clean_frames + n_frames
             full_gesture_sequence, gesture_seed, full_audio_features, main_agent_id_one_hot = [
                 item.squeeze(0).to(device) for item in next(iter(val_loader))
@@ -76,7 +76,9 @@ def evaluate_frechet_gesture_distance_sliding_diffusion(
             # The audio features should be cut in the same way
             current_encoded_gesture_sequence = full_encoded_gesture_sequence[:, 0:model.diffusion.num_clean_frames + model.diffusion.num_denoise_frames + model.diffusion.num_noise_frames,:]
 
-            for i in range(evaluation_length + model.diffusion.num_denoise_frames):
+            print("Starting inference steps for sliding diffusion...")
+
+            for i in range(model.diffusion.num_denoise_frames + model.diffusion.num_noise_frames + evaluation_length):
                 # We also need to cut out the relevant audio features. As these are not predicted by the model we cut them out of the full audio features
                 # at every iteration
                 current_audio_features = full_audio_features[:, i:i + model.diffusion.num_clean_frames + model.diffusion.num_denoise_frames + model.diffusion.num_noise_frames, :]
@@ -89,10 +91,12 @@ def evaluate_frechet_gesture_distance_sliding_diffusion(
                 )
                 # copy the newest predicted frame to the result tensor
                 result_tensor[:, i, :] = current_encoded_gesture_sequence[:, model.diffusion.num_clean_frames, :]
+                
+                print("Step", i + 1, "of", model.diffusion.num_denoise_frames + model.diffusion.num_noise_frames + evaluation_length, "done.")
             
-            # The first num_presteps frames of the prediction had access to the original gesture sequence, so in a sense they 'cheated'. For this reason, we discard them.
-            # The remaining n_frames result tensor are the final generated gestures.
-            result_tensor = result_tensor[:, model.diffusion.num_clean_frames:, :]
+            # The first num_clean_frames frames of the prediction had access to the original gesture sequence, so in a sense they 'cheated'. For this reason, we discard them.
+            # The remaining frames (evaluation length) result tensor are the final generated gestures.
+            result_tensor = result_tensor[:, model.diffusion.num_denoise_frames + model.diffusion.num_noise_frames:, :]
 
             # Now we use the autoencoder to decode the result tensor from the low dimensional latent space to the original feature space.
             if pose_encoder is not None:

@@ -119,7 +119,9 @@ class GPUDataset(Dataset):
     """Dataset that keeps data on GPU for maximum performance with vectorized operations"""
     def __init__(self, consolidated_file, seq_length=150, seed_length=0, 
                  batch_size=32, epoch_length=1000, return_audio_frame_index=False,
-                 device=torch.device('cuda'), use_only_world_pos_gesture_features=False, loading_encoded_data=False, include_world_pos_gesture_features=False, include_vel_acc_features=False):
+                 device=torch.device('cuda'), use_only_world_pos_gesture_features=False, 
+                 loading_encoded_data=False, include_world_pos_gesture_features=False, 
+                 include_vel_acc_features=False): 
         self.seq_length = seq_length
         self.seed_length = seed_length
         self.batch_size = batch_size
@@ -232,7 +234,7 @@ class GPUDataset(Dataset):
         all_starts = self.valid_starts[indices]
         # Reshape into [epoch_length, batch_size]
         self.batch_starts = all_starts.reshape(self.epoch_length, self.batch_size)
-    
+
     def __len__(self):
         return self.epoch_length
     
