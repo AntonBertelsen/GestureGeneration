@@ -3,7 +3,7 @@ import torch.nn as nn
 from torch import Tensor
 import numpy as np
 from scipy.signal import savgol_coeffs
-from smoother import Smoother
+from Smoothing.smoother import Smoother
 
 
 # An interface / Abstract class for smoothing operations. 
