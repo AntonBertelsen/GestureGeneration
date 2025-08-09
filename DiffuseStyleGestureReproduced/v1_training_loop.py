@@ -282,26 +282,18 @@ def train(
         model.eval()
         
         if epoch % 100 == 0:
-
-
-            # Because frechet distance is super noisy we calculate it many times and average to get a much more stable number.
-            calculated_frechet_distances = []
-
-            for i in range(100):
-                # We calculate the Frechet distance between the generated and true gestures.
-                # This is a measure of how similar the distribution of the generated gestures is to the distribution of the true gestures.
-                frechet_distance, _, = v1_evaluation.evaluate_frechet_gesture_distance(
-                    model             = model,
-                    val_loader        = val_loader,
-                    device            = device,
-                    evaluation_length = 30,
-                    num_samples       = num_fgd_samples,
-                    calculate_raw_frechet_distance = False
-                )
-
-                calculated_frechet_distances.append(frechet_distance)
-
-            frechet_distance = np.mean(calculated_frechet_distances)
+            # We calculate the Frechet distance between the generated and true gestures.
+            # This is a measure of how similar the distribution of the generated gestures is to the distribution of the true gestures.
+            frechet_distance, _, = v1_evaluation.evaluate_frechet_gesture_distance(
+                model                 = model,
+                val_loader            = val_loader,
+                device                = device,
+                evaluation_length     = 30,
+                calculate_raw_frechet_distance = False,
+                samples_per_iteration = num_fgd_samples,
+                num_iterations = 10,
+                bootstrap_samples = 0
+            )
 
             # Log the Frechet distance so we can see how it changes over time.
             frechet_distance_rec['encoded'].append(frechet_distance)
@@ -762,7 +754,10 @@ def resume_training_from_checkpoint(
     model = ContinuousMotionModel.load_model(model_state, device)
     
     # Load optimizer state
-    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+    try:
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+    except ValueError:
+        print("Could not load optimizer state. Optimizer will be initialized from scratch.")
 
     # Load loss records
     train_loss_rec.update(checkpoint['train_loss_rec'])

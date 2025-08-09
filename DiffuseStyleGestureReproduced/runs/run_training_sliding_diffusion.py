@@ -50,7 +50,7 @@ train(
         condition_mask_probabilty = 0.1,
         number_of_attention_heads = 8,
         predict_full_duration = False,
-        reinject_seed_style_t = False,
+        reinject_seed_style_full_t = False,
         debugger = Debugger(
             on = False, 
             keys_for_printing_while_running = ["ALL"]

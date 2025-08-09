@@ -10,10 +10,13 @@ warnings.filterwarnings("ignore", category=RuntimeWarning)  # ignore warnings
 class EmbeddingSpaceEvaluator:
     def __init__(self, embed_net_path, n_frames, device, pose_dim):
         # init embed net
-        ckpt = torch.load(embed_net_path, map_location=device)
         self.pose_dim = pose_dim
         self.net = EmbeddingNet(self.pose_dim, n_frames).to(device)
-        self.net.load_state_dict(ckpt)
+        
+        if embed_net_path is not None:
+            ckpt = torch.load(embed_net_path, map_location=device)
+            self.net.load_state_dict(ckpt)
+        
         self.net.train(False)
 
         self.reset()

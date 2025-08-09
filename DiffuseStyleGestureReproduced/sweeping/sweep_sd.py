@@ -51,7 +51,7 @@ def sd_model_sweep():
             number_of_attention_heads = config['number_of_attention_heads'],
             num_transformer_layers = config['num_transformer_layers'],
             predict_full_duration = False,
-            reinject_seed_style_t = False,
+            reinject_seed_style_full_t = False,
             debugger = Debugger(
                 on = False, 
                 keys_for_printing_while_running = ["ALL"]
