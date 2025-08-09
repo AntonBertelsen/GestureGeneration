@@ -1,11 +1,11 @@
 #!/bin/bash
 
-#SBATCH --job-name=normal_vs_sliding_diff                           # Name of the job
+#SBATCH --job-name=clean_and_denoise_sweep                           # Name of the job
 #SBATCH --output=output/sliding_vs_normal_diff/%j.out               # Output file (%j is the job ID)
 #SBATCH --cpus-per-task=1                                           # Number of CPU cores requested
 #SBATCH --gres=gpu                                                  # Request 1 NVIDIA A100 GPU
 #SBATCH --time=3-00:00:00                                           # Maximum runtime (12 hours)
-#SBATCH --mem=32G                                                   # Amount of memory requested
+#SBATCH --mem=48G                                                   # Amount of memory requested
 #SBATCH --partition=acltr
 
 echo "==== Job info ===="
@@ -26,5 +26,43 @@ echo "==== Starting training script ===="
 
 cd ..
 
-#python -m runs.run_for_both_normal_and_sliding_diffusion_no_poseencoder --model_type="sliding" --seed=6 --entity="pefu-it-university-of-copenhagen" --project="sliding_vs_normal_20_50_vs_70" 
-python -m runs.run_for_both_normal_and_sliding_diffusion_no_poseencoder --model_type="normal"  --seed=6 --entity="pefu-it-university-of-copenhagen" --project="sliding_vs_normal_20_50_vs_70" 
+
+#python -m runs.run_for_both_normal_and_sliding_diffusion_no_poseencoder --seed=1 --model_type="sliding" --num_clean_frames=100 --num_denoise_frames=200 --entity="pefu-it-university-of-copenhagen" --project="FINAL_normal_clean_and_denoise_frames_sweep"
+#python -m runs.run_for_both_normal_and_sliding_diffusion_no_poseencoder --seed=1 --model_type="sliding" --num_clean_frames=100 --num_denoise_frames=100 --entity="pefu-it-university-of-copenhagen" --project="FINAL_normal_clean_and_denoise_frames_sweep"
+#python -m runs.run_for_both_normal_and_sliding_diffusion_no_poseencoder --seed=1 --model_type="sliding" --num_clean_frames=100 --num_denoise_frames=50 --entity="pefu-it-university-of-copenhagen" --project="FINAL_sliding_clean_and_denoise_frames_sweep" 
+#python -m runs.run_for_both_normal_and_sliding_diffusion_no_poseencoder --seed=1 --model_type="sliding" --num_clean_frames=50 --num_denoise_frames=50 --entity="pefu-it-university-of-copenhagen" --project="FINAL_sliding_clean_and_denoise_frames_sweep" 
+#python -m runs.run_for_both_normal_and_sliding_diffusion_no_poseencoder --seed=1 --model_type="sliding" --num_clean_frames=50 --num_denoise_frames=20 --entity="pefu-it-university-of-copenhagen" --project="FINAL_sliding_clean_and_denoise_frames_sweep" 
+#python -m runs.run_for_both_normal_and_sliding_diffusion_no_poseencoder --seed=1 --model_type="sliding" --num_clean_frames=50 --num_denoise_frames=5 --entity="pefu-it-university-of-copenhagen" --project="FINAL_sliding_clean_and_denoise_frames_sweep" 
+#
+#python -m runs.run_for_both_normal_and_sliding_diffusion_no_poseencoder --seed=1 --model_type="sliding" --num_clean_frames=20 --num_denoise_frames=200 --entity="pefu-it-university-of-copenhagen" --project="FINAL_sliding_clean_and_denoise_frames_sweep" 
+#python -m runs.run_for_both_normal_and_sliding_diffusion_no_poseencoder --seed=1 --model_type="sliding" --num_clean_frames=20 --num_denoise_frames=100 --entity="pefu-it-university-of-copenhagen" --project="FINAL_sliding_clean_and_denoise_frames_sweep" 
+#python -m runs.run_for_both_normal_and_sliding_diffusion_no_poseencoder --seed=1 --model_type="sliding" --num_clean_frames=20 --num_denoise_frames=50 --entity="pefu-it-university-of-copenhagen" --project="FINAL_sliding_clean_and_denoise_frames_sweep" 
+#python -m runs.run_for_both_normal_and_sliding_diffusion_no_poseencoder --seed=1 --model_type="sliding" --num_clean_frames=20 --num_denoise_frames=20 --entity="pefu-it-university-of-copenhagen" --project="FINAL_sliding_clean_and_denoise_frames_sweep" 
+#python -m runs.run_for_both_normal_and_sliding_diffusion_no_poseencoder --seed=1 --model_type="sliding" --num_clean_frames=20 --num_denoise_frames=5 --entity="pefu-it-university-of-copenhagen" --project="FINAL_sliding_clean_and_denoise_frames_sweep" 
+#
+#python -m runs.run_for_both_normal_and_sliding_diffusion_no_poseencoder --seed=1 --model_type="sliding" --num_clean_frames=5 --num_denoise_frames=100 --entity="pefu-it-university-of-copenhagen" --project="FINAL_sliding_clean_and_denoise_frames_sweep" 
+#python -m runs.run_for_both_normal_and_sliding_diffusion_no_poseencoder --seed=1 --model_type="sliding" --num_clean_frames=5 --num_denoise_frames=50 --entity="pefu-it-university-of-copenhagen" --project="FINAL_sliding_clean_and_denoise_frames_sweep" 
+#python -m runs.run_for_both_normal_and_sliding_diffusion_no_poseencoder --seed=1 --model_type="sliding" --num_clean_frames=5 --num_denoise_frames=20 --entity="pefu-it-university-of-copenhagen" --project="FINAL_sliding_clean_and_denoise_frames_sweep" 
+python -m runs.run_for_both_normal_and_sliding_diffusion_no_poseencoder --seed=1 --model_type="sliding" --num_clean_frames=5 --num_denoise_frames=5 --entity="pefu-it-university-of-copenhagen" --project="FINAL_sliding_clean_and_denoise_frames_sweep" 
+
+
+
+#python -m runs.run_for_both_normal_and_sliding_diffusion_no_poseencoder --seed=2 --model_type="sliding" --num_clean_frames=100 --num_denoise_frames=200 --entity="pefu-it-university-of-copenhagen" --project="FINAL_normal_clean_and_denoise_frames_sweep"
+#python -m runs.run_for_both_normal_and_sliding_diffusion_no_poseencoder --seed=2 --model_type="sliding" --num_clean_frames=100 --num_denoise_frames=100 --entity="pefu-it-university-of-copenhagen" --project="FINAL_normal_clean_and_denoise_frames_sweep"
+#python -m runs.run_for_both_normal_and_sliding_diffusion_no_poseencoder --seed=2 --model_type="sliding" --num_clean_frames=100 --num_denoise_frames=50 --entity="pefu-it-university-of-copenhagen" --project="FINAL_sliding_clean_and_denoise_frames_sweep" 
+#python -m runs.run_for_both_normal_and_sliding_diffusion_no_poseencoder --seed=2 --model_type="sliding" --num_clean_frames=50 --num_denoise_frames=50 --entity="pefu-it-university-of-copenhagen" --project="FINAL_sliding_clean_and_denoise_frames_sweep" 
+#python -m runs.run_for_both_normal_and_sliding_diffusion_no_poseencoder --seed=2 --model_type="sliding" --num_clean_frames=50 --num_denoise_frames=20 --entity="pefu-it-university-of-copenhagen" --project="FINAL_sliding_clean_and_denoise_frames_sweep" 
+#python -m runs.run_for_both_normal_and_sliding_diffusion_no_poseencoder --seed=2 --model_type="sliding" --num_clean_frames=50 --num_denoise_frames=5 --entity="pefu-it-university-of-copenhagen" --project="FINAL_sliding_clean_and_denoise_frames_sweep" 
+#
+#python -m runs.run_for_both_normal_and_sliding_diffusion_no_poseencoder --seed=2 --model_type="sliding" --num_clean_frames=20 --num_denoise_frames=200 --entity="pefu-it-university-of-copenhagen" --project="FINAL_sliding_clean_and_denoise_frames_sweep" 
+#python -m runs.run_for_both_normal_and_sliding_diffusion_no_poseencoder --seed=2 --model_type="sliding" --num_clean_frames=20 --num_denoise_frames=100 --entity="pefu-it-university-of-copenhagen" --project="FINAL_sliding_clean_and_denoise_frames_sweep" 
+#python -m runs.run_for_both_normal_and_sliding_diffusion_no_poseencoder --seed=2 --model_type="sliding" --num_clean_frames=20 --num_denoise_frames=50 --entity="pefu-it-university-of-copenhagen" --project="FINAL_sliding_clean_and_denoise_frames_sweep" 
+#python -m runs.run_for_both_normal_and_sliding_diffusion_no_poseencoder --seed=2 --model_type="sliding" --num_clean_frames=20 --num_denoise_frames=20 --entity="pefu-it-university-of-copenhagen" --project="FINAL_sliding_clean_and_denoise_frames_sweep" 
+#python -m runs.run_for_both_normal_and_sliding_diffusion_no_poseencoder --seed=2 --model_type="sliding" --num_clean_frames=20 --num_denoise_frames=5 --entity="pefu-it-university-of-copenhagen" --project="FINAL_sliding_clean_and_denoise_frames_sweep" 
+#
+#python -m runs.run_for_both_normal_and_sliding_diffusion_no_poseencoder --seed=2 --model_type="sliding" --num_clean_frames=5 --num_denoise_frames=100 --entity="pefu-it-university-of-copenhagen" --project="FINAL_sliding_clean_and_denoise_frames_sweep" 
+#python -m runs.run_for_both_normal_and_sliding_diffusion_no_poseencoder --seed=2 --model_type="sliding" --num_clean_frames=5 --num_denoise_frames=50 --entity="pefu-it-university-of-copenhagen" --project="FINAL_sliding_clean_and_denoise_frames_sweep" 
+#python -m runs.run_for_both_normal_and_sliding_diffusion_no_poseencoder --seed=2 --model_type="sliding" --num_clean_frames=5 --num_denoise_frames=20 --entity="pefu-it-university-of-copenhagen" --project="FINAL_sliding_clean_and_denoise_frames_sweep" 
+#python -m runs.run_for_both_normal_and_sliding_diffusion_no_poseencoder --seed=2 --model_type="sliding" --num_clean_frames=5 --num_denoise_frames=5 --entity="pefu-it-university-of-copenhagen" --project="FINAL_sliding_clean_and_denoise_frames_sweep" 
+
+
