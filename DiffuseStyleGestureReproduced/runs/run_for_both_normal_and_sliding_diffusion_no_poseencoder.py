@@ -27,6 +27,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="W&B Sweep Agent Launcher")
     # parser.add_argument("--sweep_id", type=str, default=None, help="Sweep ID to join.")
     parser.add_argument("--model_type", type=str, default="normal", choices=["normal", "sliding"], help="Type of diffusion model to use.")
+    parser.add_argument("--num_clean_frames", type=int, default=None, choices=[100, 50, 20, 5,], help="Number of clean frames for sliding diffusion.")
+    parser.add_argument("--num_denoise_frames", type=int, default=None, choices=[200, 100, 50, 20, 5], help="Number of denoise frames for sliding diffusion.")
     parser.add_argument("--seed", type=int, default=42, help="Random seed.")
     parser.add_argument("--entity", type=str, default="pefu-it-university-of-copenhagen", help="W&B entity (team or username).")
     parser.add_argument("--project", type=str, default="normal_vs_sliding", help="W&B project name.")
@@ -37,26 +39,65 @@ if __name__ == "__main__":
 
     seed = args.seed
 
-    run = wandb.init(project=args.project, name=f"_{args.model_type}_diffusion_seed_{seed}")
+    name_parts = [f"{args.model_type}_seed_{seed}"]
+
+    if args.num_clean_frames is not None:
+        name_parts.append(f"clean_{args.num_clean_frames}")
+
+    if args.num_denoise_frames is not None:
+        name_parts.append(f"denoise_{args.num_denoise_frames}")
+
+    name_parts.append(f"with_8_seed_frames")
+
+    final_name = "_".join(name_parts)
+
+    run = wandb.init(project=args.project, name=final_name)
+
+    print(f"Run initialized with name: {final_name}")
+    print(f"Run initialized with name: {final_name}")
+    
+    if args.num_clean_frames is None or args.num_denoise_frames is None:
+        run.config.update({
+            "model_type": args.model_type,
+            "num_clean_frames": args.num_clean_frames,
+            "num_denoise_frames": args.num_denoise_frames,
+            "seed": seed,
+        })
 
     device = utils.get_device()
 
     utils.set_seed(seed)
 
-
     if (args.model_type == "sliding"):
+        num_clean_frames = args.num_clean_frames
+        num_denoise_frames = args.num_denoise_frames
+        seq_length = num_clean_frames + num_denoise_frames
+        
+        if num_denoise_frames == 5:
+            noise_schedule = Diffusion.linear_schedule(0.00005, 0.55)
+        if num_denoise_frames == 20:
+            noise_schedule = Diffusion.linear_schedule(0.00015, 0.2)
+        if num_denoise_frames == 50:
+            noise_schedule = Diffusion.linear_schedule(0.00020, 0.1)
+        if num_denoise_frames == 100:
+            noise_schedule = Diffusion.linear_schedule(0.00020, 0.06)
+        if num_denoise_frames == 200:
+            noise_schedule = Diffusion.linear_schedule(0.00025, 0.003)
+
         diffusion_model = SlidingDiffusion(
-            num_clean_frames = 20,
-            num_denoise_frames = 50,
+            num_clean_frames = num_clean_frames,
+            num_denoise_frames = num_denoise_frames,
             num_noise_frames = 0,
             num_timestep_stackings = 1,
-            noise_schedule = Diffusion.linear_schedule(0.00015, 0.15),
+            noise_schedule = noise_schedule,
             device = device
         )
     elif (args.model_type == "normal"):
+        seq_length = 70  # Normal diffusion uses a fixed sequence length of 70
+
         diffusion_model = NormalDiffusion(
             num_timesteps = 100,
-            sequence_length = 70,
+            sequence_length = seq_length,
             noise_schedule = Diffusion.linear_schedule(0.00015, 0.075),
             device = device
         )
@@ -64,6 +105,8 @@ if __name__ == "__main__":
         raise ValueError(f"Unknown model type: {args.model_type}. Choose 'normal' or 'sliding'.")
     
     print("Starting training...")
+
+    seed_length = 8  # Seed length for the model
 
     train(
         num_fgd_samples = 2048,
@@ -74,8 +117,8 @@ if __name__ == "__main__":
             diffusion = diffusion_model,
             pose_encoder = None, # AdvancedPoseEncoder.load_from_checkpoint("advanced_pose_encoder_ik_pca_64", device),
             number_of_styles = 17,
-            gesture_length = 70,
-            seed_length = 0,
+            gesture_length = seq_length,
+            seed_length = seed_length,
             audio_features_per_frame = 37,
             pose_features_per_frame = 345,
             condition_mask_probabilty = 0.1,
@@ -92,8 +135,8 @@ if __name__ == "__main__":
         training_loader = DataLoader(
                 GPUDataset(
                     consolidated_file = "dataset/genea2023_dataset/trn/main-agent/consolidated.npz",
-                    seq_length = 70,
-                    seed_length = 0,
+                    seq_length = seq_length,
+                    seed_length = seed_length,
                     batch_size = 256,
                     epoch_length = 1000,
                     loading_encoded_data = False,
@@ -107,8 +150,8 @@ if __name__ == "__main__":
         val_loader = DataLoader(
                 GPUDataset(
                     consolidated_file = "dataset/genea2023_dataset/val/main-agent/consolidated.npz",
-                    seq_length = 70,
-                    seed_length = 0,
+                    seq_length = seq_length,
+                    seed_length = seed_length,
                     batch_size = 64,
                     epoch_length = 30,
                     loading_encoded_data = False,
@@ -119,7 +162,7 @@ if __name__ == "__main__":
                 num_workers = 0,
                 pin_memory = False
             ),
-        num_epochs = 10000,
+        num_epochs = 2000,
         learning_rate = 0.00005,
         reconstruction_loss_weight = 4.0,
         variance_loss_weight = 0.1,
@@ -149,7 +192,7 @@ if __name__ == "__main__":
         #     (1.0, 0.85, 80),
         #     (0.85, 0.6, 100)
         # ],
-        visualize_step = 100,
+        visualize_step = 200,
         run = run,
         wandb_config = run.config
     )

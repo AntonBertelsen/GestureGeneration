@@ -209,6 +209,11 @@ def train(
             # Backward pass to compute gradients                        
             total_loss.backward()
 
+            # Gradient clipping
+            if epoch > 10:  # start clipping gradients after 10 epochs to allow the model to stabilize after a few epochs
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+
+
             # Take an optimization step
             optimizer.step()
 
