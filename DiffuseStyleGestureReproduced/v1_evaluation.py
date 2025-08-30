@@ -238,6 +238,9 @@ def evaluate_frechet_gesture_distance_normal_diffusion(
                 
                 # Extract evaluation frames
                 result_tensor = denoised_gesture_sequence[:, -evaluation_length:, :]
+
+                # Extract only the original feature dimensions if richer features were used
+                result_tensor = result_tensor[:, :, :model.original_pose_features_per_frame]
                 
                 # Decode if needed
                 if pose_encoder is not None:
@@ -260,6 +263,9 @@ def evaluate_frechet_gesture_distance_normal_diffusion(
             with autocast(device_type=device.type, dtype=torch.bfloat16):
                 # Process real samples for this iteration
                 original_gesture_sequence = gesture_sequence[:, -evaluation_length:, :]
+
+                # Extract only the original feature dimensions if richer features were used
+                original_gesture_sequence = original_gesture_sequence[:, :, :model.original_pose_features_per_frame]
                 
                 if val_loader.dataset.loading_encoded_data:
                     original_gesture_sequence = pose_encoder.decode(original_gesture_sequence)
