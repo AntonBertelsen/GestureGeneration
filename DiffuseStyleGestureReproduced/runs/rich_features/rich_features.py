@@ -22,7 +22,7 @@ device = utils.get_device()
 utils.set_seed(seed)
 
 train(
-    num_fgd_samples = 8192,
+    num_fgd_samples = 1024,
     experiment_collection_name = "first_tests",
     upload_model_check_point = False, # should upload the model checkpoint to wandb
     model_checkpoint_dir = "v1_models",
@@ -46,7 +46,7 @@ train(
         gesture_length = 80,
         seed_length = 0,
         audio_features_per_frame = 37,
-        pose_features_per_frame = 345,
+        pose_features_per_frame = 1557,
         original_pose_features_per_frame = 345,
         condition_mask_probabilty = 0.0,
         number_of_attention_heads = 8,
@@ -101,14 +101,14 @@ train(
     acceleration_loss_weight = 1.5,
     jerk_loss_weight= 0.2,
     latent_space_loss_weight = 0.0,
-    category_weighting = {
-        'fingers': 0.25,
-        'arms': 2.0,
-        'legs': 1.0,
-        'spine': 2.0,
-        'head': 1.0,
-        'root': 2.0
-    },
+    # category_weighting = { # Not compatible with richer features. We can fix this in the future
+    #     'fingers': 0.25,
+    #     'arms': 2.0,
+    #     'legs': 1.0,
+    #     'spine': 2.0,
+    #     'head': 1.0,
+    #     'root': 2.0
+    # },
     # category_weighting = {
     #     'left_arm_ik': 2.0,
     #     'right_arm_ik': 2.0,
