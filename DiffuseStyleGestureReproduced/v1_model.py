@@ -3,7 +3,7 @@ import torch.nn as nn
 from torch.amp import autocast
 from local_attention import transformer
 from local_attention.rotary import SinusoidalEmbeddings, apply_rotary_pos_emb
-from typing import Union
+from typing import Optional, Tuple, Union
 from utils.WnB_trackable import WnBTrackable
 from diffusion import Diffusion
 from v1_sliding_diffusion import SlidingDiffusion
@@ -13,6 +13,7 @@ from pose_encoder.vae_pose_encoder import VAEPoseEncoder
 from pose_encoder.advanced_pose_encoder import AdvancedPoseEncoder
 from utils.debugger import Debugger, Show
 import utils.utils as utils
+import matplotlib.pyplot as plt
 
 class ContinuousMotionModel(nn.Module, WnBTrackable):
     def __init__(self, 
@@ -319,7 +320,7 @@ class ContinuousMotionModel(nn.Module, WnBTrackable):
         # If we are reinjecting the fake frame with the seed style and timestep stacking level, we need to exclude the first frame from the output tensor.
         return output_tensor[:, 1:] if self.reinject_seed_style_frame_t else output_tensor[:, :]
 
-    def generate(self, gesture_sequence, audio_features, main_agent_id_one_hot, gesture_seed = None, gesture_sequence_is_encoded: bool = False):
+    def generate(self, gesture_sequence, audio_features, main_agent_id_one_hot, gesture_seed = None, gesture_sequence_is_encoded: bool = False, valid_timestep_range: Optional[Tuple[int, int]] = None):
         with autocast(device_type=self.device.type, dtype=torch.bfloat16):
 
             # If the autoencoder model is provided, we use it to encode the gesture sequence to a lower dimensional latent space
@@ -328,6 +329,11 @@ class ContinuousMotionModel(nn.Module, WnBTrackable):
             # We diffuse the encoded gesture sequence to create a noisy starting point for the diffusion model.
             # generate a random timestep for each sequence in the batch
             per_sequence_timestep = torch.randint(0, self.diffusion.number_of_timesteps, (encoded_gesture_sequence.shape[0],), device=self.device)
+
+            if valid_timestep_range is not None:
+                # We need to ensure that the per_sequence_timestep is within the valid range
+                per_sequence_timestep = per_sequence_timestep.clamp(*valid_timestep_range)
+
             noisy_gesture_sequence = self.diffusion.forward(encoded_gesture_sequence, per_sequence_timestep)
 
             # Apply the model to denoise the noisy gesture sequence.
