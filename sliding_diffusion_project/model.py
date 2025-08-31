@@ -5,9 +5,9 @@ from local_attention import transformer
 from local_attention.rotary import SinusoidalEmbeddings, apply_rotary_pos_emb
 from typing import Optional, Tuple, Union
 from utils.WnB_trackable import WnBTrackable
-from diffusion_noise_scheduler_super import Diffusion
-from diffusion_noise_scheduler_sliding_diff import SlidingDiffusion
-from diffusion_noise_scheduler_normal_diff import NormalDiffusion
+from diffusion_process_super import Diffusion
+from diffusion_process_sliding import SlidingDiffusion
+from diffusion_process_normal import NormalDiffusion
 from experimental_pose_encoder_model_extension.pose_encoder import PoseEncoder
 from experimental_pose_encoder_model_extension.vae_pose_encoder import VAEPoseEncoder
 from experimental_pose_encoder_model_extension.advanced_pose_encoder import AdvancedPoseEncoder

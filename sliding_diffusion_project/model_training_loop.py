@@ -700,7 +700,7 @@ def visualize_training_progress(
     plt.show()
 
 def save_model_checkpoint(
-        model: ContinuousMotionModel, 
+        model: ContinuousMotionModel,
         checkpoint_dir: str, 
         model_name: str, 
         epoch: int,

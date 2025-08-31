@@ -7,13 +7,13 @@ from torch.utils.data import DataLoader
 from utils.animation.skeleton import Skeleton
 from utils.evaluation.FGD.embedding_space_evaluator import EmbeddingSpaceEvaluator
 import utils.animation.visualisation.new.animation_visualisation as animation_visualisation
-from diffusion_noise_scheduler_sliding_diff import SlidingDiffusion
-from diffusion_noise_scheduler_normal_diff import NormalDiffusion
+from diffusion_process_sliding import SlidingDiffusion
+from diffusion_process_normal import NormalDiffusion
 from torch.amp import autocast
 
 
 def evaluate_frechet_gesture_distance_sliding_diffusion(
-        model: ContinuousMotionModel, 
+        model: ContinuousMotionModel,
         val_loader: DataLoader, 
         device: torch.device,
         evaluation_length = 30, 
@@ -186,7 +186,7 @@ def evaluate_frechet_gesture_distance_sliding_diffusion(
             return frechet_distance_feat_space, frechet_distance_raw
     
 def evaluate_frechet_gesture_distance_normal_diffusion(
-        model: ContinuousMotionModel, 
+        model: ContinuousMotionModel,
         val_loader: DataLoader, 
         device: torch.device,
         evaluation_length = 30, 
@@ -363,7 +363,7 @@ def perform_bootstrap_resampling(gen_samples_list, real_samples_list, embed_net,
     }
 
 def evaluate_frechet_gesture_distance(
-        model: ContinuousMotionModel, 
+        model: ContinuousMotionModel,
         val_loader: DataLoader, 
         device: torch.device,
         evaluation_length = 30, 

@@ -1,0 +1,16 @@
+{
+  "os": "Windows-11-10.0.26100-SP0",
+  "python": "CPython 3.13.1",
+  "startedAt": "2025-06-04T12:59:22.025509Z",
+  "program": "C:\\Users\\peter\\Documents\\ITU\\M4_semester\\GestureGeneration\\DiffuseStyleGestureReproduced\\sweep.py",
+  "codePath": "DiffuseStyleGestureReproduced\\sweep.py",
+  "git": {
+    "remote": "https://github.com/AntonBertelsen/GestureGeneration.git",
+    "commit": "19f7c6141666f3cc95c3d9b9c3b8a0bdf474b967"
+  },
+  "email": "pefu@itu.dk",
+  "root": "C:\\Users\\peter\\Documents\\ITU\\M4_semester\\GestureGeneration\\DiffuseStyleGestureReproduced",
+  "host": "work_pc",
+  "executable": "C:\\Python313\\python.exe",
+  "codePathLocal": "sweep.py"
+}

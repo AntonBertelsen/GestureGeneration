@@ -180,31 +180,33 @@ cython_debug/
 
 # Dataset exclusion
 # Ignore everything inside dataset/
-DiffuseStyleGestureReproduced/dataset/*
-DiffuseStyleGestureReproduced/dataset/genea2023_dataset/trn/**/bvh/
-DiffuseStyleGestureReproduced/dataset/genea2023_dataset/trn/**/tsv/
-DiffuseStyleGestureReproduced/dataset/genea2023_dataset/trn/**/wav/
-DiffuseStyleGestureReproduced/dataset/genea2023_dataset/trn/**/wav/
-DiffuseStyleGestureReproduced/dataset/genea2023_dataset/trn/**/features/
-DiffuseStyleGestureReproduced/dataset/genea2023_dataset/*
-DiffuseStyleGestureReproduced/dataset/
+sliding_diffusion_project/dataset/*
+sliding_diffusion_project/dataset/genea2023_dataset/trn/**/bvh/
+sliding_diffusion_project/dataset/genea2023_dataset/trn/**/tsv/
+sliding_diffusion_project/dataset/genea2023_dataset/trn/**/wav/
+sliding_diffusion_project/dataset/genea2023_dataset/trn/**/wav/
+sliding_diffusion_project/dataset/genea2023_dataset/trn/**/features/
+sliding_diffusion_project/dataset/genea2023_dataset/*
+sliding_diffusion_project/dataset/
 
 # Ignore everything in FDG:
-DiffuseStyleGestureReproduced/dataset/wandb/
+sliding_diffusion_project/dataset/wandb/
 
 
 # Ignore everything inside debug_files/
-DiffuseStyleGestureReproduced/debug_files/*
+sliding_diffusion_project/debug_files/*
 
 # Ignore everything inside bvh_tests/
-DiffuseStyleGestureReproduced/bvh_tests/results/*
-DiffuseStyleGestureReproduced/bvh_testsfeatures/*
-DiffuseStyleGestureReproduced/bvh_tests/bvh/*
+sliding_diffusion_project/bvh_tests/results/*
+sliding_diffusion_project/bvh_testsfeatures/*
+sliding_diffusion_project/bvh_tests/bvh/*
 
 .DS_Store
 
-DiffuseStyleGestureReproduced/v1_models/
-DiffuseStyleGestureReproduced/pose_encoder/models/
-DiffuseStyleGestureReproduced/.wandbkey
+sliding_diffusion_project/trained_models/
+sliding_diffusion_project/experimental_pose_encoder_model_extension/models/
+sliding_diffusion_project/.wandbkey
 
 job_output/
+
+.idea/

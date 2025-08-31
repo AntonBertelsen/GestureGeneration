@@ -1,6 +1,6 @@
 import torch
 from typing import Callable, Union
-from diffusion_noise_scheduler_super import *
+from diffusion_process_super import *
 
 class SlidingDiffusion(Diffusion):
 
