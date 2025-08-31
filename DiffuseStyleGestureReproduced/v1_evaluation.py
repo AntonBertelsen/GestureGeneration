@@ -104,6 +104,9 @@ def evaluate_frechet_gesture_distance_sliding_diffusion(
                 # The remaining n_frames result tensor are the final generated gestures.
                 result_tensor = result_tensor[:, model.diffusion.num_denoise_frames + model.diffusion.num_noise_frames:, :]
 
+                # Extract only the original feature dimensions if richer features were used
+                result_tensor = result_tensor[..., :model.original_pose_features_per_frame]
+
                 # Decode if needed
                 if pose_encoder is not None:
                     output = pose_encoder.decode(result_tensor)
@@ -131,6 +134,9 @@ def evaluate_frechet_gesture_distance_sliding_diffusion(
 
                 original_gesture_sequence = full_gesture_sequence[:, model.diffusion.num_clean_frames + model.diffusion.num_denoise_frames:model.diffusion.num_clean_frames + model.diffusion.num_denoise_frames + evaluation_length, :]
                 
+                # Extract only the original feature dimensions if richer features were used
+                original_gesture_sequence = original_gesture_sequence[..., :model.original_pose_features_per_frame]
+
                 if val_loader.dataset.loading_encoded_data:
                     original_gesture_sequence = pose_encoder.decode(original_gesture_sequence)
 
@@ -238,6 +244,9 @@ def evaluate_frechet_gesture_distance_normal_diffusion(
                 
                 # Extract evaluation frames
                 result_tensor = denoised_gesture_sequence[:, -evaluation_length:, :]
+
+                # Extract only the original feature dimensions if richer features were used
+                result_tensor = result_tensor[:, :, :model.original_pose_features_per_frame]
                 
                 # Decode if needed
                 if pose_encoder is not None:
@@ -260,6 +269,9 @@ def evaluate_frechet_gesture_distance_normal_diffusion(
             with autocast(device_type=device.type, dtype=torch.bfloat16):
                 # Process real samples for this iteration
                 original_gesture_sequence = gesture_sequence[:, -evaluation_length:, :]
+
+                # Extract only the original feature dimensions if richer features were used
+                original_gesture_sequence = original_gesture_sequence[:, :, :model.original_pose_features_per_frame]
                 
                 if val_loader.dataset.loading_encoded_data:
                     original_gesture_sequence = pose_encoder.decode(original_gesture_sequence)

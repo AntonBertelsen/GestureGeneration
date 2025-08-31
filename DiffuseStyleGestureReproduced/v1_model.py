@@ -33,6 +33,7 @@ class ContinuousMotionModel(nn.Module, WnBTrackable):
                 debugger: Debugger = Debugger(False),       # Debugger to use for debugging the model. This is used to capture and display information about the model during training and inference.
                 device = utils.get_device(),
                 num_transformer_layers = 6,                 # Number of layers in the transformer encoder. The original paper uses 6, but we can experiment with this.
+                original_pose_features_per_frame: int = None
             ):
         super().__init__()
 
@@ -51,7 +52,8 @@ class ContinuousMotionModel(nn.Module, WnBTrackable):
             "reinject_seed_style_frame_t": reinject_seed_style_frame_t,
             "num_frames_without_audio": num_frames_without_audio,
             "device": device,
-            "num_transformer_layers": num_transformer_layers
+            "num_transformer_layers": num_transformer_layers,
+            "original_pose_features_per_frame": original_pose_features_per_frame
         }
 
         self.gesture_length = gesture_length
@@ -71,6 +73,7 @@ class ContinuousMotionModel(nn.Module, WnBTrackable):
         self.device = device
         self.pose_features_per_frame = pose_features_per_frame
         self.num_transformer_layers = num_transformer_layers
+        self.original_pose_features_per_frame = original_pose_features_per_frame if original_pose_features_per_frame is not None else pose_features_per_frame
 
 
         # If a pose encoder model is provided, we will use it to encode the gesture sequence before passing it to the main model.
@@ -465,19 +468,22 @@ class ContinuousMotionModel(nn.Module, WnBTrackable):
         
         # Create the main model
         model = ContinuousMotionModel(
-            gesture_length              = config['gesture_length'],
-            audio_features_per_frame    = config['audio_features_per_frame'],
-            pose_features_per_frame     = config['pose_features_per_frame'],
-            number_of_styles            = config['number_of_styles'],
-            diffusion                   = diffusion,
-            condition_mask_probabilty   = config['condition_mask_probabilty'],
-            number_of_attention_heads   = config['number_of_attention_heads'],
-            pose_encoder                = pose_encoder,
-            predict_full_duration       = config['predict_full_duration'],
-            seed_length                 = config['seed_length'],
-            reinject_seed_style_full_t       = config['reinject_seed_style_t'],
-            num_transformer_layers      = config['num_transformer_layers'],
-            device                      = device
+            gesture_length                      = config['gesture_length'],
+            audio_features_per_frame            = config['audio_features_per_frame'],
+            pose_features_per_frame             = config['pose_features_per_frame'],
+            number_of_styles                    = config['number_of_styles'],
+            diffusion                           = diffusion,
+            condition_mask_probabilty           = config['condition_mask_probabilty'],
+            number_of_attention_heads           = config['number_of_attention_heads'],
+            pose_encoder                        = pose_encoder,
+            predict_full_duration               = config['predict_full_duration'],
+            seed_length                         = config['seed_length'],
+            reinject_seed_style_full_t          = config['reinject_seed_style_full_t'],
+            reinject_seed_style_frame_t         = config['reinject_seed_style_frame_t'],
+            num_frames_without_audio            = config['num_frames_without_audio'],
+            num_transformer_layers              = config['num_transformer_layers'],
+            original_pose_features_per_frame    = config['original_pose_features_per_frame'],
+            device                              = device
         ).to(device)
 
         return model
