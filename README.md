@@ -1,5 +1,5 @@
 # Sliding Diffusion
-Realtime, Streaming, Low-Latency, Audio-Driven Gesture Generation
+A Streaming Framework for Real-Time Co-Speech Gesture Synthesis
 
 This repository contains the implementation of Sliding Diffusion, developed as part of the Master’s Thesis by Anton Dalsgaard Bertelsen and Peter Berndt Fuchs at the IT University of Copenhagen.
 

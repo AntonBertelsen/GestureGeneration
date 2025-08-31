@@ -4,7 +4,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-from pose_encoder.pose_encoder import PoseEncoder
+from experimental_pose_encoder_model_extension.pose_encoder import PoseEncoder
 import matplotlib.pyplot as plt
 from sklearn.decomposition import PCA
 from IPython.display import clear_output
