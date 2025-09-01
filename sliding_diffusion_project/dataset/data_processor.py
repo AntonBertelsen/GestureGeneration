@@ -257,8 +257,8 @@ class DataProcessor:
             print("Using pre-calculated normalization parameters from training data")
             mean_pose = self.normalization_data['mean_pose']
             std_pose = self.normalization_data['std_pose']
-            world_pos_mean_pose = self.normalization_data.get('world_pos_mean_pose', None)
-            world_pos_std_pose = self.normalization_data.get('world_pos_std_pose', None)
+            world_pos_mean_pose = self.normalization_data['world_pos_mean_pose']
+            world_pos_std_pose = self.normalization_data['world_pos_std_pose']
             mel_spec_min = self.normalization_data['mel_spec_min']
             mel_spec_max = self.normalization_data['mel_spec_max']
             mel_spec_range = self.normalization_data['mel_spec_range']
@@ -393,6 +393,8 @@ class DataProcessor:
                 'skeleton': self.skeleton,
                 'mean_pose': mean_pose,
                 'std_pose': std_pose,
+                'world_pos_mean_pose': world_pos_mean_pose,
+                'world_pos_std_pose': world_pos_std_pose,
                 'mel_spec_min': mel_spec_min,
                 'mel_spec_max': mel_spec_max,
                 'mel_spec_range': mel_spec_range,

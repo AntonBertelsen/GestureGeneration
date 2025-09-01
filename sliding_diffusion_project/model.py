@@ -363,7 +363,7 @@ class ContinuousMotionModel(nn.Module, WnBTrackable):
             shifted_gesture_sequence = torch.roll(starting_point, shifts=-1, dims=1)
             
             # Replace the last frame with pure noise
-            shifted_gesture_sequence[0,-1] = torch.zeros_like(shifted_gesture_sequence[0,-1])
+            shifted_gesture_sequence[0,-1] = torch.rand_like(shifted_gesture_sequence[0,-1])
             gesture_sequence = shifted_gesture_sequence
 
             for stacking_level in range(self.diffusion.number_of_timesteps):

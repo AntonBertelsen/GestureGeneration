@@ -167,12 +167,12 @@ export class TensorVisualizer {
         if (!this.tensorCanvas || !this.tensorContext || !tensorData) return;
 
         const { data, name, shape, min_value, max_value } = tensorData;
-        const [width, height] = shape;
+        const [height, width ] = shape;
         
         // Resize the canvas to match the actual tensor dimensions with padding
         const padding = 50;
-        this.tensorCanvas.width = width * 2 + padding;
-        this.tensorCanvas.height = height * 2 + padding;
+        this.tensorCanvas.width = height * 2 + padding;
+        this.tensorCanvas.height = width * 2 + padding;
         
         // Clear canvas
         this.tensorContext.clearRect(0, 0, this.tensorCanvas.width, this.tensorCanvas.height);
@@ -180,8 +180,8 @@ export class TensorVisualizer {
         // Draw title and details
         this.tensorContext.fillStyle = 'white';
         this.tensorContext.font = '12px Arial';
-        this.tensorContext.fillText(name || `Tensor Visualization (${width}×${height})`, 10, 15);
-        this.tensorContext.fillText(`Range: ${min_value.toFixed(4)} to ${max_value.toFixed(4)}`, 10, 30);
+        // this.tensorContext.fillText(name || `Tensor Visualization (${width}×${height})`, 10, 15);
+        // this.tensorContext.fillText(`Range: ${min_value.toFixed(4)} to ${max_value.toFixed(4)}`, 10, 30);
         
         const draw_min_value = -2.5
         const draw_max_value = 2.5;
@@ -206,6 +206,22 @@ export class TensorVisualizer {
             }
         }
         
+        // Draw a vertical line for the clean frame index
+        const cleanFrameIndex = 50; // Hardcoded as requested
+        const lineX = 2 * cleanFrameIndex + padding / 2;
+
+        this.tensorContext.strokeStyle = 'red';
+        this.tensorContext.lineWidth = 1;
+        this.tensorContext.setLineDash([5, 3]); // 5 pixels on, 3 pixels off for a dotted effect
+
+        this.tensorContext.beginPath();
+        this.tensorContext.moveTo(lineX, padding / 2);
+        this.tensorContext.lineTo(lineX, 2 * width + padding / 2);
+        this.tensorContext.stroke();
+
+        // Reset line dash for other drawings
+        this.tensorContext.setLineDash([]);
+
         // Draw scale
         const gradientWidth = Math.min(300, this.tensorCanvas.width - 20);
         const gradient = this.tensorContext.createLinearGradient(10, 0, 10 + gradientWidth, 0);

@@ -121,7 +121,8 @@ class GPUDataset(Dataset):
                  batch_size=32, epoch_length=1000, return_audio_frame_index=False,
                  device=torch.device('cuda'), use_only_world_pos_gesture_features=False, 
                  loading_encoded_data=False, include_world_pos_gesture_features=False, 
-                 include_vel_acc_features=False): 
+                 include_vel_acc_features=False):
+        self.consolidated_file = consolidated_file
         self.seq_length = seq_length
         self.seed_length = seed_length
         self.batch_size = batch_size

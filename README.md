@@ -38,7 +38,7 @@ Sliding Diffusion builds upon diffusion models for gesture generation and introd
 
 - `dataset/dataset.py`
   - Contains two PyTorch dataset classes:
-    - `RAMDataset`: Loads dataset into RAM, extracts batches dynamically (good for small datasets).
+    - `RAMDataset`: Loads dataset into RAM. This may not be fully functional.
     - `GPUDataset`: Loads dataset directly to GPU for maximum performance with large datasets.
 
 ### Utilities
@@ -54,7 +54,7 @@ Sliding Diffusion builds upon diffusion models for gesture generation and introd
 ### Environment Setup
 with Conda (Anaconda or Miniconda)
 ```bash
-conda create -n SlidingDiffusion python=3.13
+conda create -n SlidingDiffusion python=3.11.6
 conda activate SlidingDiffusion
 pip install -r requirements.txt
 ````
@@ -63,25 +63,39 @@ pip install -r requirements.txt
 
 ### Dataset Setup
 
-This project uses the GENEA 2023 dataset. Download and unpack it with:
+This project uses the GENEA 2023 dataset. Download and unpack it. (On Windows you will have to manually unzip it. The folder structure should be eg. `dataset/genea2023_dataset/val/...`)
 
+**Validation Dataset:**
 ```bash
-wget -O sliding_diffusion_project/dataset/genea2023_dataset.zip "https://zenodo.org/records/8199133/files/genea2023_trn.zip?download=1" \
-&& unzip sliding_diffusion_project/dataset/genea2023_dataset.zip -d sliding_diffusion_project/dataset/genea2023_dataset/
+wget -O sliding_diffusion_project/dataset/genea2023_val_dataset.zip "https://zenodo.org/records/8199133/files/genea2023_val.zip?download=1" \
+&& unzip sliding_diffusion_project/dataset/genea2023_val_dataset.zip -d sliding_diffusion_project/dataset/
+```
+
+**Training Dataset** (Large)
+```bash
+wget -O sliding_diffusion_project/dataset/genea2023_trn_dataset.zip "https://zenodo.org/records/8199133/files/genea2023_trn.zip?download=1" \
+&& unzip sliding_diffusion_project/dataset/genea2023_trn_dataset.zip -d sliding_diffusion_project/dataset/
 ```
 
 Steps performed:
 
 1. Downloads the dataset archive from [Zenodo](https://zenodo.org/records/8199133)
 2. Saves it as `genea2023_dataset.zip` inside `sliding_diffusion_project/dataset/`
-3. Extracts the archive to `dataset/genea2023_dataset/`
+3. Extracts the archive to `dataset/`
 4. (Optional) Remove `.zip` to save space
 
 Finally, copy the skeleton config into the dataset folder:
 
 ```bash
-cp sliding_diffusion_project/dataset/skeleton_config.yaml sliding_diffusion_project/dataset/genea2023_dataset/
+cp sliding_diffusion_project/utils/skeleton_config.yaml sliding_diffusion_project/dataset/genea2023_dataset/
 ```
+
+> **Note:** The validation dataset is normalized relative to the traning dataset. This means that if you choose to only download the validation dataset you need to download the precompiled normalization data for the training dataset. 
+> 
+> This is avaliable [here](https://drive.google.com/file/d/1DirJSyIoNL4J6o_YIoSO3MAIvaw0rPZW/view?usp=sharing).
+> Place the file in `dataset\genea2023_dataset\trn\main-agent\consolidated_meta.pkl`
+
+
 
 ---
 
@@ -90,7 +104,8 @@ cp sliding_diffusion_project/dataset/skeleton_config.yaml sliding_diffusion_proj
 Run:
 
 ```bash
-python -m data_processor.py
+cd sliding_diffusion_project
+python -m dataset.data_processor --dataset_type **trn / val**
 ```
 
 ## Ready to go
@@ -99,16 +114,14 @@ python -m data_processor.py
 ### To try training a model:
 Open the `quick_start_training_your_own.ipynb` Jupyter notebook to try the following
 
-1. Build `GPUDataset` (or `RAMDataset` for smaller experiments)
+1. Load `GPUDataset`
 2. Adjust hyperparameters as needed
 3. Run the training loop
 4. Test inference mode
 
 ### To try generating animation with a pre-trained model:
 
-Download a pre-trained model from [LINK](https://lol.lol/lol/8199133) and place it in the `trained_models` folder.
-Then go to `Quick_start_inference_with_pretrained.ipynb` to try generating animations with the pre-trained model and our bvh viewer.
+Download a pre-trained model from [here](https://drive.google.com/file/d/1fohAsiM5CShuEul0RqNc0r-oFJOpOME8/view?usp=sharing) and place it in the `trained_models` folder.
+Then go to `quick_start_inference_with_pretrained.ipynb` to try generating animations with the pre-trained model and our bvh viewer.
 
-
-
-
+Alternatively go to `microphone_inference.ipynb` to generate gestures based on your microphone. Note that this works very poorly if the microphone loudness or quality is outside the distribution of the dataset.

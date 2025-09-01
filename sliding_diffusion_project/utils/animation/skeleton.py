@@ -49,13 +49,13 @@ class Skeleton:
         self.world_pos_std_pose = self.world_pos_std_pose.to(device) if self.world_pos_std_pose is not None else None
         self._joint_offsets_tensor = self._joint_offsets_tensor.to(device) if self._joint_offsets_tensor is not None else None
 
-    def set_mean_std(self, mean_pose: np.ndarray, std_pose: np.ndarray, world_pos_mean_pose: np.ndarray = None, world_Pos_mean_std: np.ndarray = None) -> None:
+    def set_mean_std(self, mean_pose: np.ndarray, std_pose: np.ndarray, world_pos_mean_pose: np.ndarray = None, world_pos_mean_std: np.ndarray = None) -> None:
         """Set the mean and standard deviation for normalization."""
         self.mean_pose = torch.tensor(mean_pose, dtype=torch.float32, device=self.device)
         self.std_pose = torch.tensor(std_pose, dtype=torch.float32, device=self.device)
-        if world_pos_mean_pose is not None and world_Pos_mean_std is not None:
+        if world_pos_mean_pose is not None and world_pos_mean_std is not None:
             self.world_pos_mean_pose = torch.tensor(world_pos_mean_pose, dtype=torch.float32, device=self.device)
-            self.world_pos_std_pose = torch.tensor(world_Pos_mean_std, dtype=torch.float32, device=self.device)
+            self.world_pos_std_pose = torch.tensor(world_pos_mean_std, dtype=torch.float32, device=self.device)
 
     def add_joint(self, joint_name: str, parent_name: Optional[str] = None) -> None:
         """Add a joint to the skeleton."""
