@@ -2,11 +2,11 @@ import time
 import torch
 import torch.nn as nn
 from typing import Dict, List
-from pose_encoder.ik_two_bone import IKChain2Bone
-from pose_encoder.batched_ik_registry import BatchedIKRegistry
+from experimental_pose_encoder_model_extension.ik_two_bone import IKChain2Bone
+from experimental_pose_encoder_model_extension.batched_ik_registry import BatchedIKRegistry
 import utils.utils as utils
 
-from pose_encoder.pose_encoder import PoseEncoder
+from experimental_pose_encoder_model_extension.pose_encoder import PoseEncoder
 
 class SimpleEncoder(nn.Module):
     """Simple VAE encoder/decoder."""

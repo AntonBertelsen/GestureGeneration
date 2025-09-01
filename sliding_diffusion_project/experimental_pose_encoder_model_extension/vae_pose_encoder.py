@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from pose_encoder.pose_encoder import PoseEncoder
+from experimental_pose_encoder_model_extension.pose_encoder import PoseEncoder
 
 # We use a Variational Autoencoder (beta-VAE) architecture to encode and decode pose data.
 # This is highly effective for learning a compact representation of the pose data, which can then be used in the diffusion model.

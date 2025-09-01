@@ -289,7 +289,7 @@ def train(
         if epoch % 100 == 0:
             # We calculate the Frechet distance between the generated and true gestures.
             # This is a measure of how similar the distribution of the generated gestures is to the distribution of the true gestures.
-            frechet_distance, _, = v1_evaluation.evaluate_frechet_gesture_distance(
+            frechet_distance, _, = evaluation_fgd_calculation.evaluate_frechet_gesture_distance(
                 model                 = model,
                 val_loader            = val_loader,
                 device                = device,
