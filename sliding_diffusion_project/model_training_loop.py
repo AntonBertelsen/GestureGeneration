@@ -177,7 +177,7 @@ def train(
             # We are using our own batching mechanism in the dataset to to avoid having to use a collate function.
             # As such, each item contains a full batch, but we need to handle the extra dimension 
             # from batch_size=1 from the dataloader.
-            gesture_sequence, gesture_seed, audio_features, main_agent_id_one_hot = [
+            gesture_sequence, gesture_seed, audio_features, main_agent_id_one_hot, finger_availability = [
                 item.squeeze(0).to(device) for item in batch_data
             ]
 
@@ -186,7 +186,8 @@ def train(
                 audio_features              = audio_features,
                 main_agent_id_one_hot       = main_agent_id_one_hot,
                 gesture_seed                = gesture_seed,
-                gesture_sequence_is_encoded = training_loader.dataset.loading_encoded_data
+                gesture_sequence_is_encoded = training_loader.dataset.loading_encoded_data,
+                finger_availability         = finger_availability
             )
 
             # Perform loss calculations.
@@ -313,7 +314,7 @@ def train(
         with torch.no_grad():
             for val_batch in val_loader:
                 # We are using our own batching mechanism in the dataset to to avoid having to use a collate function.
-                gesture_sequence, gesture_seed, audio_features, main_agent_id_one_hot = [
+                gesture_sequence, gesture_seed, audio_features, main_agent_id_one_hot, finger_availability = [
                     item.squeeze(0).to(device) for item in val_batch
                 ]
                 
@@ -322,7 +323,8 @@ def train(
                     audio_features              = audio_features,
                     main_agent_id_one_hot       = main_agent_id_one_hot,
                     gesture_seed                = gesture_seed,
-                    gesture_sequence_is_encoded = val_loader.dataset.loading_encoded_data
+                    gesture_sequence_is_encoded = val_loader.dataset.loading_encoded_data,
+                    finger_availability         = finger_availability
                 )
 
                 # Perform loss calculations.

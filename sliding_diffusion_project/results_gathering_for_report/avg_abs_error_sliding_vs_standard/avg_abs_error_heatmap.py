@@ -37,7 +37,7 @@ def avgerage_absolute_error_experiemnt(val_loader: DataLoader, model: Continuous
 
     with torch.no_grad():
         for val_batch in val_loader:
-            gesture_sequence, gesture_seed, audio_features, main_agent_id_one_hot = [
+            gesture_sequence, gesture_seed, audio_features, main_agent_id_one_hot, finger_availability = [
                 item.squeeze(0).to(device) for item in val_batch
             ]
             
@@ -45,6 +45,7 @@ def avgerage_absolute_error_experiemnt(val_loader: DataLoader, model: Continuous
                 gesture_sequence            = gesture_sequence,
                 audio_features              = audio_features,
                 main_agent_id_one_hot       = main_agent_id_one_hot,
+                finger_availability         = finger_availability,
                 gesture_seed                = gesture_seed,
                 gesture_sequence_is_encoded = val_loader.dataset.loading_encoded_data
             )

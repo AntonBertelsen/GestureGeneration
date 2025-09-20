@@ -61,7 +61,7 @@ def evaluate_frechet_gesture_distance_sliding_diffusion(
                 # We also need enough data to move past the the noising area (num_of_timestep_frames) + the initial noising area (num_of_timestep_frames)
                 # We also need enough data to have n_frames of data generated when we are done. (n_frames)
                 # i.e. sequence length retrieved by val_loader should be num_presteps + 2 * num_of_timestep_frames + num_of_post_timestep_frames + n_frames
-                full_gesture_sequence, gesture_seed, full_audio_features, main_agent_id_one_hot = [
+                full_gesture_sequence, gesture_seed, full_audio_features, main_agent_id_one_hot, finger_availability = [
                     item.squeeze(0).to(device) for item in next(iter(val_loader))
                 ]
 
@@ -95,6 +95,7 @@ def evaluate_frechet_gesture_distance_sliding_diffusion(
                         current_encoded_gesture_sequence, 
                         current_audio_features, 
                         main_agent_id_one_hot,
+                        finger_availability,
                         gesture_seed
                     )
                     # copy the newest predicted frame to the result tensor
@@ -222,7 +223,7 @@ def evaluate_frechet_gesture_distance_normal_diffusion(
 
             with autocast(device_type=device.type, dtype=torch.bfloat16):
                 # Get data from dataloader
-                gesture_sequence, gesture_seed, audio_features, main_agent_id_one_hot = [
+                gesture_sequence, gesture_seed, audio_features, main_agent_id_one_hot, finger_availability = [
                     item.squeeze(0).to(device) for item in next(iter(val_loader))
                 ]
                 
@@ -239,7 +240,8 @@ def evaluate_frechet_gesture_distance_normal_diffusion(
                         one_hot_style=main_agent_id_one_hot,
                         audio_features=audio_features,
                         noisy_gesture_sequence=noisy_gesture_sequence,
-                        seed_gesture_sequence=gesture_seed
+                        seed_gesture_sequence=gesture_seed,
+                        finger_availability=finger_availability
                     )
                 
                 # Extract evaluation frames

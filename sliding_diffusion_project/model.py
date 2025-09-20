@@ -29,6 +29,7 @@ class ContinuousMotionModel(nn.Module, WnBTrackable):
                 seed_length: int = 0,                       # If not 0 we condition the generation on a seed gesture sequence. This is to allow for continous generation of sequences, where we can use the last generated sequence as a seed for the next sequence.
                 reinject_seed_style_full_t: bool = False,   # If True we will reinject the full t after the local attention layer. Because we have varying timesteps for each frame, we concatenate vertically as opposed to the original paper. This means that this is very expensive to do performance wise with attention being O(N^2)
                 reinject_seed_style_frame_t: bool = False,  # If True we will reinject the t and style akin to the original paper, where we concatenate the seed style and timestep at the beginning of the sequence as an extra frame. In the case of sliding diffusion we will concatenate the timestep stacking level instead of the timestep, and the system will hopefully be able to learn correct nosing level for each frame based on this.
+                use_finger_availability: bool = True,       # If True we will append a binary feature to the style vector, indicating whether the finger data is available or not. This is to allow the model to learn to ignore the finger data when it is not available, and to use it when it is available. This is useful when we have a dataset with some speakers with finger data and some without.
                 num_frames_without_audio: int = 0,          # Number of frames in the sequence that do not have audio features. The idea is that we can generate the last frames of the sequence without audio features. In sliding diffusion, since these are the more uncertain frames, it lets us make some guess about what a likely gesture could be, and still gives us time to correct it with the audio features when they become available. This is one way to reduce the latency of the system, since we can generate the last frames of the sequence without waiting for the audio features to be available.
                 debugger: Debugger = Debugger(False),       # Debugger to use for debugging the model. This is used to capture and display information about the model during training and inference.
                 device = utils.get_device(),
@@ -50,6 +51,7 @@ class ContinuousMotionModel(nn.Module, WnBTrackable):
             "seed_length": seed_length,
             "reinject_seed_style_full_t": reinject_seed_style_full_t,
             "reinject_seed_style_frame_t": reinject_seed_style_frame_t,
+            "use_finger_availability": use_finger_availability,
             "num_frames_without_audio": num_frames_without_audio,
             "device": device,
             "num_transformer_layers": num_transformer_layers,
@@ -68,6 +70,7 @@ class ContinuousMotionModel(nn.Module, WnBTrackable):
         self.seed_length = seed_length
         self.reinject_seed_style_full_t = reinject_seed_style_full_t
         self.reinject_seed_style_frame_t = reinject_seed_style_frame_t
+        self.use_finger_availability = use_finger_availability
         self.num_frames_without_audio = num_frames_without_audio
         self.debugger = debugger
         self.device = device
@@ -105,8 +108,14 @@ class ContinuousMotionModel(nn.Module, WnBTrackable):
         # we can extract features of the style. For instance, 2 speakers might share the same general waviness in their 
         # gestures, and this can be encoded as a feature which is shared between the two speakers. This is a way to make 
         # the model more general, and to make it easier to generalize to new speakers.
+
+        style_input_size = number_of_styles
+        if self.use_finger_availability:
+            # Add 1 dimension for finger availability flag
+            style_input_size += 1
+
         self.style_linear = nn.Linear(
-            in_features=number_of_styles, 
+            in_features=style_input_size, 
             out_features = 64
         )
 
@@ -180,7 +189,8 @@ class ContinuousMotionModel(nn.Module, WnBTrackable):
                 one_hot_style, 
                 audio_features, 
                 noisy_gesture_sequence,
-                seed_gesture_sequence=None):
+                seed_gesture_sequence=None,
+                finger_availability=None):
 
         self.debugger.capture([("one_hot_style", one_hot_style),("audio_features", audio_features),("noisy_gesture_sequence", noisy_gesture_sequence)],[Show.MAX_MIN,], keys=["input_analysis"])
         
@@ -203,6 +213,14 @@ class ContinuousMotionModel(nn.Module, WnBTrackable):
             timestep_stacking_after_timestep_stacking_mlp = self.timestep_stacking_mlp(timestep.unsqueeze(-1).float()).unsqueeze(1).expand(bs, 1, -1)
         
         # Apply a linear layer to get a tensor of shape (bs, 1, 64)
+
+        # If using finger availability, concatenate it with the speaker ID
+        if self.use_finger_availability:
+            finger_availability = torch.ones_like(finger_availability)
+
+            # Concatenate with style
+            one_hot_style = torch.cat([one_hot_style, finger_availability], dim=-1)
+
         style = self.style_linear(one_hot_style)
         self.debugger.capture(("style AFTER style_linear", style), [Show.MAX_MIN, Show.IMAGE, Show.SHAPE], keys="style")
 
@@ -323,7 +341,7 @@ class ContinuousMotionModel(nn.Module, WnBTrackable):
         # If we are reinjecting the fake frame with the seed style and timestep stacking level, we need to exclude the first frame from the output tensor.
         return output_tensor[:, 1:] if self.reinject_seed_style_frame_t else output_tensor[:, :]
 
-    def generate(self, gesture_sequence, audio_features, main_agent_id_one_hot, gesture_seed = None, gesture_sequence_is_encoded: bool = False, valid_timestep_range: Optional[Tuple[int, int]] = None):
+    def generate(self, gesture_sequence, audio_features, main_agent_id_one_hot, finger_availability, gesture_seed = None, gesture_sequence_is_encoded: bool = False, valid_timestep_range: Optional[Tuple[int, int]] = None):
         with autocast(device_type=self.device.type, dtype=torch.bfloat16):
 
             # If the autoencoder model is provided, we use it to encode the gesture sequence to a lower dimensional latent space
@@ -345,7 +363,8 @@ class ContinuousMotionModel(nn.Module, WnBTrackable):
                 one_hot_style               = main_agent_id_one_hot,
                 audio_features              = audio_features, 
                 noisy_gesture_sequence      = noisy_gesture_sequence,
-                seed_gesture_sequence       = gesture_seed
+                seed_gesture_sequence       = gesture_seed,
+                finger_availability         = finger_availability
             )
             
             if not self.predict_full_duration:
@@ -357,7 +376,7 @@ class ContinuousMotionModel(nn.Module, WnBTrackable):
 
             return output, encoded_gesture_sequence, encoded_output, noisy_gesture_sequence
 
-    def inference(self, starting_point, audio_features, main_agent_id_one_hot, gesture_seed = None):
+    def inference(self, starting_point, audio_features, main_agent_id_one_hot, finger_availability, gesture_seed = None):
         with autocast(device_type=self.device.type, dtype=torch.bfloat16):
             # Shift the gesture_sequence by one frame
             shifted_gesture_sequence = torch.roll(starting_point, shifts=-1, dims=1)
@@ -366,7 +385,7 @@ class ContinuousMotionModel(nn.Module, WnBTrackable):
             shifted_gesture_sequence[0,-1] = torch.rand_like(shifted_gesture_sequence[0,-1])
             gesture_sequence = shifted_gesture_sequence
 
-            for stacking_level in range(self.diffusion.number_of_timesteps):
+            for stacking_level in range(self.diffusion.number_of_timesteps-1, -1, -1):
 
                 per_sequence_stacking_level = torch.tensor([stacking_level], device=self.device).repeat(gesture_sequence.shape[0])
 
@@ -378,7 +397,8 @@ class ContinuousMotionModel(nn.Module, WnBTrackable):
                     one_hot_style               = main_agent_id_one_hot,
                     audio_features              = audio_features, 
                     noisy_gesture_sequence      = noisy_gesture_sequence,
-                    seed_gesture_sequence       = gesture_seed
+                    seed_gesture_sequence       = gesture_seed,
+                    finger_availability         = finger_availability
                 )
 
                 if not self.predict_full_duration or not self.training:

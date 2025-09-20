@@ -121,7 +121,7 @@ class GPUDataset(Dataset):
                  batch_size=32, epoch_length=1000, return_audio_frame_index=False,
                  device=torch.device('cuda'), use_only_world_pos_gesture_features=False, 
                  loading_encoded_data=False, include_world_pos_gesture_features=False, 
-                 include_vel_acc_features=False):
+                 include_vel_acc_features=False, include_speaking_status=True):
         self.consolidated_file = consolidated_file
         self.seq_length = seq_length
         self.seed_length = seed_length
@@ -134,6 +134,7 @@ class GPUDataset(Dataset):
         self.loading_encoded_data = loading_encoded_data
         self.include_world_pos_gesture_features = include_world_pos_gesture_features
         self.include_vel_acc_features = include_vel_acc_features
+        self.include_speaking_status = include_speaking_status
         
         print(f"Initializing GPU-resident dataset on {device}")
         
@@ -148,6 +149,9 @@ class GPUDataset(Dataset):
             # Move normalization stats directly to GPU
             self.mean_pose = torch.from_numpy(self.metadata['mean_pose']).half().to(device)
             self.std_pose = torch.from_numpy(self.metadata['std_pose']).half().to(device)
+
+            self.audio_dim = self.metadata.get('audio_dim', 0)
+            self.speaking_status_dim = self.metadata.get('speaking_status_dim', 0)
         
         print(f"Loading data from {consolidated_file} directly to GPU...")
         # Load the entire dataset into GPU memory
@@ -161,9 +165,29 @@ class GPUDataset(Dataset):
             if self.include_world_pos_gesture_features:
                 self.world_pos_gestures = torch.from_numpy(data['world_pos_gestures']).half().to(device)
 
-        self.audio = torch.from_numpy(data['audio']).half().to(device)
+        # Load and process audio features
+        audio_features = torch.from_numpy(data['audio']).half()
+        
+        # Load and merge speaking status if requested and available
+        if self.include_speaking_status:
+            speaking_status = torch.from_numpy(data['speaking_status']).half()
+            # Concatenate speaking status with audio features
+            self.audio = torch.cat([audio_features, speaking_status], dim=-1)
+            print(f"Audio features with speaking status, shape: {self.audio.shape}")
+        else:
+            self.audio = audio_features
+            
+        # Move to device
+        self.audio = self.audio.to(device)
+        
         self.speakers = torch.from_numpy(data['speakers']).half().to(device)
         
+        self.finger_availability = torch.from_numpy(data['finger_availability']).half().to(device)
+        print(f"Finger availability data included, shape: {self.finger_availability.shape}")
+
+        # Update audio dimension to reflect merged features
+        self.effective_audio_dim = self.audio.shape[-1]
+
         # Close numpy file to free file handles
         data.close()
         
@@ -259,6 +283,7 @@ class GPUDataset(Dataset):
         gesture_batch = self.gestures[gesture_indices]  # Shape: [batch_size, seq_length, gesture_dim]
         audio_batch = self.audio[gesture_indices]  # Shape: [batch_size, seq_length, audio_dim]
         speaker_batch = self.speakers[segment_indices]  # Shape: [batch_size, speaker_dim]
+        finger_availability_batch = self.finger_availability[segment_indices]
         
         if not self.loading_encoded_data:
             # Apply z-score normalization
@@ -292,6 +317,6 @@ class GPUDataset(Dataset):
         if self.return_audio_frame_index:
             # Return the start frame index for the audio snippet
             audio_frame_indices = start_points + self.seed_length
-            return gesture_batch, seed_batch, audio_batch, speaker_batch, audio_frame_indices
+            return gesture_batch, seed_batch, audio_batch, speaker_batch, finger_availability_batch, audio_frame_indices
         else:
-            return gesture_batch, seed_batch, audio_batch, speaker_batch
+            return gesture_batch, seed_batch, audio_batch, speaker_batch, finger_availability_batch

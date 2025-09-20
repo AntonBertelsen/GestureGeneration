@@ -97,6 +97,9 @@ class DataProcessor:
             main_agent_id_one_hot[int(main_agent_id) - 1] = 1
             interloctr_id_one_hot = np.zeros(self.num_speakers, dtype=np.float16)
             interloctr_id_one_hot[int(interloctr_id) - 1] = 1
+
+            has_fingers = np.array([1.0 if main_agent_has_fingers == '1' else 0.0], dtype=np.float16)
+
             
             # Extract BVH features using BVHParser
             bvh_path = os.path.join(self.bvh_dir, bvh_file)
@@ -109,8 +112,22 @@ class DataProcessor:
             
             # Extract audio features
             wav_path = os.path.join(self.wav_dir, wav_file)
-            # mel_spec, mfcc, rms_energy, pitch, energy_derivatives, pitch_derivatives, onsets, wavlm_features = extract_audio_features(wav_path)
             mel_spec, mfcc, rms_energy, pitch, energy_derivatives, pitch_derivatives, onsets = extract_audio_features(wav_path)
+
+            # Get number of frames
+            num_frames = bvh_features.shape[0]
+
+            # Extract speaking status if TSV directory is provided
+            speaking_status = np.zeros((num_frames, 2), dtype=np.float16)
+
+            # Get root dir as folder that metadata file is in
+            root_dir = os.path.dirname(self.metadata_file)
+            # Get TSV files for main agent and interlocutor
+            main_agent_tsv = os.path.join(root_dir, 'main-agent', 'tsv', f"{prefix}_main-agent.tsv")
+            interloctr_tsv = os.path.join(root_dir, 'interloctr', 'tsv', f"{prefix}_interloctr.tsv")
+            
+            # Extract one-hot encoded speaking status
+            speaking_status = self.extract_speaking_status(main_agent_tsv, interloctr_tsv, num_frames)
 
             # Crop to minimum length (all audio features are the same length)
             min_length = min(bvh_features.shape[0], mel_spec.shape[0])
@@ -124,6 +141,7 @@ class DataProcessor:
             energy_derivatives = energy_derivatives[:min_length, :]
             pitch_derivatives = pitch_derivatives[:min_length, :]
             onsets = onsets[:min_length, :]
+            speaking_status = speaking_status[:min_length, :]
             # wavlm_features = wavlm_features[:min_length, :]
             
             # Convert to float16 to save space 
@@ -149,6 +167,8 @@ class DataProcessor:
                 pitch_derivatives_features=pitch_derivatives,
                 onsets_features=onsets,
                 # wavlm_features=wavlm_features,
+                speaking_status=speaking_status,
+                has_fingers=has_fingers,
                 prefix=prefix,
                 main_agent_id_one_hot=main_agent_id_one_hot,
                 main_agent_has_fingers=main_agent_has_fingers,
@@ -156,6 +176,82 @@ class DataProcessor:
                 interloctr_has_fingers=interloctr_has_fingers
             )
     
+    def extract_speaking_status(self, main_agent_tsv, interloctr_tsv, num_frames, fps=30.0):
+        """Extract speaking status as one-hot encoding.
+        
+        Args:
+            main_agent_tsv (str): Path to the main agent TSV transcript file
+            interloctr_tsv (str): Path to the interlocutor TSV transcript file
+            num_frames (int): Total number of frames in the sequence
+            fps (float): Frames per second of the motion data
+        
+        Returns:
+            ndarray: One-hot encoded speaking status [num_frames, 2]
+        """
+        # Initialize as zeros: [main_agent_speaking, interloctr_speaking]
+        speaking_status = np.zeros((num_frames, 2), dtype=np.float16)
+        
+        # Process main agent speaking times
+        if os.path.exists(main_agent_tsv):
+            try:
+                with open(main_agent_tsv, 'r') as f:
+                    for line in f:
+                        # Skip comments and empty lines
+                        if line.startswith("//") or not line.strip():
+                            continue
+                        
+                        parts = line.strip().split('\t')
+                        if len(parts) < 3:
+                            continue
+                        
+                        start_time = float(parts[0])
+                        end_time = float(parts[1])
+                        
+                        # Convert time to frame indices
+                        start_frame = int(start_time * fps)
+                        end_frame = int(end_time * fps)
+                        
+                        # Ensure frames are within bounds
+                        start_frame = max(0, min(start_frame, num_frames-1))
+                        end_frame = max(0, min(end_frame, num_frames-1))
+                        
+                        # Mark main agent speaking frames with one-hot encoding [1, 0]
+                        speaking_status[start_frame:end_frame+1, 0] = 1.0
+            except Exception as e:
+                print(f"Error processing main agent TSV file {main_agent_tsv}: {e}")
+        
+        # Process interlocutor speaking times
+        if os.path.exists(interloctr_tsv):
+            try:
+                with open(interloctr_tsv, 'r') as f:
+                    for line in f:
+                        # Skip comments and empty lines
+                        if line.startswith("//") or not line.strip():
+                            continue
+                        
+                        parts = line.strip().split('\t')
+                        if len(parts) < 3:
+                            continue
+                        
+                        start_time = float(parts[0])
+                        end_time = float(parts[1])
+                        
+                        # Convert time to frame indices
+                        start_frame = int(start_time * fps)
+                        end_frame = int(end_time * fps)
+                        
+                        # Ensure frames are within bounds
+                        start_frame = max(0, min(start_frame, num_frames-1))
+                        end_frame = max(0, min(end_frame, num_frames-1))
+                        
+                        # Mark interlocutor speaking frames with one-hot encoding [0, 1]
+                        speaking_status[start_frame:end_frame+1, 1] = 1.0
+            except Exception as e:
+                print(f"Error processing interlocutor TSV file {interloctr_tsv}: {e}")
+        
+        return speaking_status
+
+
     def create_consolidated_data(self):
         """Create a single contiguous data file from all features"""
         print("Creating consolidated data file...")
@@ -182,11 +278,13 @@ class DataProcessor:
             onsets_dim = npz["onsets_features"].shape[1]
             # wavlm_features_dim = npz["wavlm_features"].shape[1]
             speaker_shape = npz["main_agent_id_one_hot"].shape
+            speaking_status_dim = npz["speaking_status"].shape[1]
         
         # First pass: calculate total frames and collect metadata
         total_frames = 0
         file_segments = []
         speaker_data = []
+        finger_availability_data = []
         
         for file_path in tqdm(feature_files, desc="Analyzing files"):
             with np.load(file_path) as npz:
@@ -201,6 +299,7 @@ class DataProcessor:
                     })
                     
                     speaker_data.append(np.array(npz["main_agent_id_one_hot"]))
+                    finger_availability_data.append(np.array(npz["has_fingers"]))
                     total_frames += frames
         
         print(f"Total frames: {total_frames}")
@@ -224,6 +323,7 @@ class DataProcessor:
         energy_derivatives = np.zeros((total_frames, energy_derivatives_dim), dtype=np.float16)
         pitch_derivatives = np.zeros((total_frames, pitch_derivatives_dim), dtype=np.float16)
         onsets = np.zeros((total_frames, onsets_dim), dtype=np.float16)
+        speaking_status = np.zeros((total_frames, speaking_status_dim), dtype=np.float16)
         # wavlm_features = np.zeros((total_frames, wavlm_features_dim), dtype=np.float16)
 
         # Second pass: fill the arrays
@@ -242,6 +342,7 @@ class DataProcessor:
                 energy_derivatives[start:end] = npz["energy_derivatives_features"][:frames]
                 pitch_derivatives[start:end] = npz["pitch_derivatives_features"][:frames]
                 onsets[start:end] = npz["onsets_features"][:frames]
+                speaking_status[start:end, :] = npz["speaking_status"][:frames]
                 # wavlm_features[start:end] = npz["wavlm_features"][:frames]
 
         print("Normalizing data...")
@@ -370,7 +471,9 @@ class DataProcessor:
             gestures=gestures,
             world_pos_gestures=world_pos_gestures,
             audio=audio_features,
-            speakers=np.array(speaker_data)
+            speakers=np.array(speaker_data),
+            finger_availability=np.array(finger_availability_data),
+            speaking_status=speaking_status
         )
 
         # Save metadata separately
@@ -407,7 +510,8 @@ class DataProcessor:
                 'energy_derivatives_mean': energy_derivatives_mean,
                 'energy_derivatives_std': energy_derivatives_std,
                 'pitch_derivatives_mean': pitch_derivatives_mean,
-                'pitch_derivatives_std': pitch_derivatives_std
+                'pitch_derivatives_std': pitch_derivatives_std,
+                'speaking_status_dim': speaking_status_dim,
                 # 'wavlm_features_mean': wavlm_features_mean,
                 # 'wavlm_features_std': wavlm_features_std
             }
