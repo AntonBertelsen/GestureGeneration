@@ -9,6 +9,7 @@ from utils.evaluation.FGD.embedding_space_evaluator import EmbeddingSpaceEvaluat
 import utils.animation.visualisation.new.animation_visualisation as animation_visualisation
 from diffusion_process_sliding import SlidingDiffusion
 from diffusion_process_normal import NormalDiffusion
+from diffusion_process_outpaint import OutpaintDiffusion
 from torch.amp import autocast
 
 
@@ -386,7 +387,7 @@ def evaluate_frechet_gesture_distance(
             num_iterations,
             bootstrap_samples
         )
-    elif isinstance(model.diffusion, NormalDiffusion):
+    elif isinstance(model.diffusion, NormalDiffusion) or isinstance(model.diffusion, OutpaintDiffusion):
         return evaluate_frechet_gesture_distance_normal_diffusion(
             model, 
             val_loader, 

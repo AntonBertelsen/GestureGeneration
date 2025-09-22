@@ -622,7 +622,7 @@ def visualize_training_progress(
     if using_pose_encoder:
         ax_encoded = fig.add_subplot(gs[1, 0])
         ax_encoded.set_title("Encoded Gesture", fontsize=20)
-        ax_encoded.imshow(encoded_gesture_sequence.to(torch.float32).permute(0, 2, 1)[0, :, :].cpu().detach().numpy(), cmap=cmap, vmin=vmin, vmax=vmax)
+        ax_encoded.imshow(encoded_gesture_sequence.to(torch.float32).permute(0, 2, 1)[0, :100, :].cpu().detach().numpy(), cmap=cmap, vmin=vmin, vmax=vmax)
         ax_encoded.set_xlabel("Time")
         ax_encoded.set_ylabel("feature")
         ax_encoded.grid(False)
@@ -630,7 +630,7 @@ def visualize_training_progress(
         
         ax_encoded_diff = fig.add_subplot(gs[1, 1])
         ax_encoded_diff.set_title("Encoded Diffused Gesture", fontsize=20)
-        ax_encoded_diff.imshow(noisy_gesture_sequence.to(torch.float32).permute(0, 2, 1)[0, :, :].cpu().detach().numpy(), cmap=cmap, vmin=vmin, vmax=vmax)
+        ax_encoded_diff.imshow(noisy_gesture_sequence.to(torch.float32).permute(0, 2, 1)[0, :100, :].cpu().detach().numpy(), cmap=cmap, vmin=vmin, vmax=vmax)
         ax_encoded_diff.set_xlabel("Time")
         ax_encoded_diff.set_ylabel("feature")
         ax_encoded_diff.grid(False)
@@ -642,7 +642,7 @@ def visualize_training_progress(
         
         ax_encoded_denoised = fig.add_subplot(gs[1, 2])
         ax_encoded_denoised.set_title("Encoded Denoised Gesture", fontsize=20)
-        ax_encoded_denoised.imshow(encoded_denoised_gesture_sequence.to(torch.float32).permute(0, 2, 1)[0, :, :].cpu().detach().numpy(), cmap=cmap, vmin=vmin, vmax=vmax)
+        ax_encoded_denoised.imshow(encoded_denoised_gesture_sequence.to(torch.float32).permute(0, 2, 1)[0, :100, :].cpu().detach().numpy(), cmap=cmap, vmin=vmin, vmax=vmax)
         ax_encoded_denoised.set_xlabel("Time")
         ax_encoded_denoised.set_ylabel("feature")
         ax_encoded_denoised.grid(False)
@@ -650,7 +650,7 @@ def visualize_training_progress(
         
         ax_encoded_diff_actual = fig.add_subplot(gs[1, 3])
         ax_encoded_diff_actual.set_title("Difference (Encoded Actual - Encoded Denoised)", fontsize=20)
-        ax_encoded_diff_actual.imshow((encoded_gesture_sequence - encoded_denoised_gesture_sequence).to(torch.float32).permute(0, 2, 1)[0, :, :].cpu().detach().numpy(), cmap=cmap, vmin=vmin, vmax=vmax)
+        ax_encoded_diff_actual.imshow((encoded_gesture_sequence - encoded_denoised_gesture_sequence).to(torch.float32).permute(0, 2, 1)[0, :100, :].cpu().detach().numpy(), cmap=cmap, vmin=vmin, vmax=vmax)
         ax_encoded_diff_actual.set_xlabel("Time")
         ax_encoded_diff_actual.set_ylabel("feature")
         ax_encoded_diff_actual.grid(False)
@@ -659,7 +659,7 @@ def visualize_training_progress(
     # Row 3: Gesture visualizations
     ax_actual = fig.add_subplot(gs[2, 0])
     ax_actual.set_title("Actual Gesture", fontsize=20)
-    ax_actual.imshow(full_gesture_sequence.to(torch.float32).permute(0, 2, 1)[0, :, :].cpu().detach().numpy(), cmap=cmap, vmin=vmin, vmax=vmax)
+    ax_actual.imshow(full_gesture_sequence.to(torch.float32).permute(0, 2, 1)[0, :100, :].cpu().detach().numpy(), cmap=cmap, vmin=vmin, vmax=vmax)
     ax_actual.set_xlabel("Time")
     ax_actual.set_ylabel("feature")
     ax_actual.grid(False)
@@ -668,7 +668,7 @@ def visualize_training_progress(
     ax_diffused = fig.add_subplot(gs[2, 1])
     ax_diffused.set_title("Diffused Gesture", fontsize=20)
     if not using_pose_encoder:
-        ax_diffused.imshow(noisy_gesture_sequence.to(torch.float32).permute(0, 2, 1)[0, :, :].cpu().detach().numpy(), cmap=cmap, vmin=vmin, vmax=vmax)
+        ax_diffused.imshow(noisy_gesture_sequence.to(torch.float32).permute(0, 2, 1)[0, :100, :].cpu().detach().numpy(), cmap=cmap, vmin=vmin, vmax=vmax)
     else:
         ax_diffused.text(0.5, 0.5, "Diffused Gesture is not available\n" \
                                       "when using pose encoder.\n\n" \
@@ -683,7 +683,7 @@ def visualize_training_progress(
     
     ax_denoised = fig.add_subplot(gs[2, 2])
     ax_denoised.set_title("Denoised Gesture", fontsize=20)
-    ax_denoised.imshow(full_denoised_gesture_sequence.to(torch.float32).permute(0, 2, 1)[0, :, :].cpu().detach().numpy(), cmap=cmap, vmin=vmin, vmax=vmax)
+    ax_denoised.imshow(full_denoised_gesture_sequence.to(torch.float32).permute(0, 2, 1)[0, :100, :].cpu().detach().numpy(), cmap=cmap, vmin=vmin, vmax=vmax)
     ax_denoised.set_xlabel("Time")
     ax_denoised.set_ylabel("feature")
     ax_denoised.grid(False)
@@ -691,7 +691,7 @@ def visualize_training_progress(
     
     ax_diff = fig.add_subplot(gs[2, 3])
     ax_diff.set_title("Difference (Actual - Denoised)", fontsize=20)
-    ax_diff.imshow((full_gesture_sequence - full_denoised_gesture_sequence).to(torch.float32).permute(0, 2, 1)[0, :, :].cpu().detach().numpy(), cmap=cmap, vmin=vmin, vmax=vmax)
+    ax_diff.imshow((full_gesture_sequence - full_denoised_gesture_sequence).to(torch.float32).permute(0, 2, 1)[0, :100, :].cpu().detach().numpy(), cmap=cmap, vmin=vmin, vmax=vmax)
     ax_diff.set_xlabel("Time")
     ax_diff.set_ylabel("feature")
     ax_diff.grid(False)
