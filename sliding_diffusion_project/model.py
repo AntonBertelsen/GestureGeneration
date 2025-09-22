@@ -8,6 +8,7 @@ from utils.WnB_trackable import WnBTrackable
 from diffusion_process_super import Diffusion
 from diffusion_process_sliding import SlidingDiffusion
 from diffusion_process_normal import NormalDiffusion
+from diffusion_process_outpaint import OutpaintDiffusion
 from experimental_pose_encoder_model_extension.pose_encoder import PoseEncoder
 from experimental_pose_encoder_model_extension.vae_pose_encoder import VAEPoseEncoder
 from experimental_pose_encoder_model_extension.advanced_pose_encoder import AdvancedPoseEncoder
@@ -471,6 +472,15 @@ class ContinuousMotionModel(nn.Module, WnBTrackable):
                 num_denoise_frames          = config['diffusion']['num_denoise_frames'],
                 num_noise_frames            = config['diffusion']['num_noise_frames'],
                 num_timestep_stackings      = config['diffusion']['num_timestep_stackings'],
+                noise_schedule              = noise_schedule,
+                device                      = device
+            )
+        elif diffusion_type == 'outpaint_diffusion':
+            # Create outpainting diffusion model
+            diffusion = OutpaintDiffusion(
+                num_timesteps               = config['diffusion']['num_timesteps'],
+                sequence_length             = config['gesture_length'],
+                overlap_frames              = config['diffusion']['overlap_frames'],
                 noise_schedule              = noise_schedule,
                 device                      = device
             )
