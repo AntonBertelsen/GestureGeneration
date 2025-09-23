@@ -513,6 +513,7 @@ class ContinuousMotionModel(nn.Module, WnBTrackable):
             num_frames_without_audio            = config['num_frames_without_audio'],
             num_transformer_layers              = config['num_transformer_layers'],
             original_pose_features_per_frame    = config['original_pose_features_per_frame'],
+            use_finger_availability             = True if 'use_finger_availability' in config else False,
             device                              = device
         ).to(device)
 
