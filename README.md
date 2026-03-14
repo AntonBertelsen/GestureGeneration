@@ -1,4 +1,10 @@
 # Sliding Diffusion
+
+[**Report**](https://drive.google.com/file/d/13ay-hdN_lcfwgMgxIBqAHZaQgJa8fOyS/view?usp=sharing) | [**Presentation**](https://www.figma.com/proto/IkkEDVQnDlYmiITRsyXQ0R/Master-Illustration-and-Presentation?node-id=555-2) | [**Video Demonstration**](https://drive.google.com/file/d/1HR3duXYMG6_kKPLG6G9zuk2ZRm3-ez01/view?usp=sharing) | [**Gestures Comparison**](https://drive.google.com/file/d/1JCI-TFRmWBp2-1aPyrnd3NU3pctY737e/view?usp=sharing)
+
+![alt text](<img1.png>)
+![alt text](<img2.png>)
+
 A Streaming Framework for Real-Time Co-Speech Gesture Synthesis
 
 This repository contains the implementation of Sliding Diffusion, developed as part of the Master’s Thesis by Anton Dalsgaard Bertelsen and Peter Berndt Fuchs at the IT University of Copenhagen.
